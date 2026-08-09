@@ -762,8 +762,33 @@ describe("lightweight pi-tui areas", () => {
     expect(footer.editor.getText()).toBe("/model sidekick deepseek/deepseek-v4-flash");
   });
 
-  test("/model dropdown filters by any-position substring (sol finds gpt-5.6-sol)", async () => {
+  test("/model manager dropdown uses the manager's provider and preserves the role", async () => {
     const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      roleProviders: (role) => (role === "manager" ? "anthropic" : "commandcode"),
+      suggestModels: async (provider) =>
+        provider === "anthropic"
+          ? [{ id: "claude-sonnet-4-6", description: "200k ctx" }]
+          : [{ id: "gpt-5.5" }],
+    });
+    footer.editor.setText("");
+    for (const ch of "/model manager") {
+      footer.editor.handleInput(ch);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    }
+    expect(footer.editor.isShowingAutocomplete()).toBe(true);
+    // The manager dropdown comes from the manager's provider.
+    const menu = textOf(footer.editor.render(80));
+    expect(menu).toContain("claude-sonnet-4-6");
+    expect(menu).not.toContain("gpt-5.5");
+    // Tab applies the model, preserving the manager role prefix.
+    footer.editor.handleInput("\t");
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(footer.editor.getText()).toBe("/model manager claude-sonnet-4-6");
+  });
+
+  test("/model dropdown filters by any-position substring (sol finds gpt-5.6-sol)", async () => {    const footer = new Footer({
       managerModel: "gpt-5.5",
       workspace: "/repo/project",
       roleProviders: () => "commandcode",
@@ -821,5 +846,31 @@ describe("lightweight pi-tui areas", () => {
     app.footer.editor.setText("draft text");
     app.clearInput();
     expect(app.footer.editor.getText()).toBe("");
+  });
+
+  test("restoreSession clears the transcript and replays the session history", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    // Populate the transcript with the current conversation.
+    app.addUser("old user message");
+    app.addManager("old manager reply");
+    const before = textOf(app.transcript.render(80));
+    expect(before).toContain("old user message");
+    expect(before).toContain("old manager reply");
+
+    // Restore a session: old entries are replaced by the session's history.
+    app.restoreSession([
+      { role: "user", text: "restored user" },
+      { role: "manager", text: "restored manager" },
+    ]);
+    const after = textOf(app.transcript.render(80));
+    expect(after).toContain("restored user");
+    expect(after).toContain("restored manager");
+    // The previous conversation is gone, not appended.
+    expect(after).not.toContain("old user message");
+    expect(after).not.toContain("old manager reply");
   });
 });

@@ -74,20 +74,47 @@ agent --help
 agent --version
 ```
 
-During an interactive run, Escape cancels the active manager request and Ctrl-C exits cleanly. Only one manager turn runs at a time.
+During an interactive run, Escape cancels the active manager request (including running sidekicks and their shell commands) and Ctrl-C exits cleanly. Only one manager turn runs at a time.
 
-### Explicit memory
+### Interactive commands
 
-Memory is never learned or injected automatically. These commands are intercepted in interactive mode before any model call:
+Slash commands are intercepted in interactive mode before any model call. Typing `/` opens an autocomplete menu; Tab applies a completion, arrow keys move the selection, and Enter confirms.
 
 ```text
+/help
+
+/model
+/model manager <model-id>
+/model sidekick <model-id>
+
+/session
+/session <session-id>
+
 /memory add user <text>
 /memory add project <text>
 /memory search <query>
-/help
 ```
 
-Writes always pass through credential-like secret filtering, and the UI reports whether redaction occurred. The manager can retrieve compact ranked memory snippets on demand with its `memory_search` tool. It can similarly retrieve bounded historical snippets with `session_search`; neither tool returns full records or transcripts.
+#### `/model`
+
+Switches the manager or sidekick model during an interactive session without restarting mimin.
+
+- Type `/model`, pick a role (`manager` or `sidekick`) from the dropdown, then pick a model from the live list.
+- The model list is provider-specific: built-in pi-ai providers show their registry, and `commandcode` fetches its live catalog.
+- Filtering is case-insensitive and matches anywhere in the id (e.g. `sol` finds `gpt-5.6-sol`).
+
+The switch applies to subsequent turns in this session only; it does **not** persist to `~/.mimin/config.json` or the project config.
+
+#### `/session`
+
+Selects and restores an existing manager session.
+
+- `/session` opens a dropdown of previous manager sessions with their message count and age.
+- Selecting one restores that session: the transcript is cleared and replayed from the session's history, and subsequent prompts continue that session.
+
+#### `/memory`
+
+Explicit memory is never learned or injected automatically. Writes always pass through credential-like secret filtering, and the UI reports whether redaction occurred. The manager can retrieve compact ranked memory snippets on demand with its `memory_search` tool, and bounded historical snippets with `session_search`; neither tool returns full records or transcripts.
 
 ## Architecture and permissions
 
