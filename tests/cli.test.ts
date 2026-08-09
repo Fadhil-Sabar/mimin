@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import type { AgentEvent } from "../src/agent/types.js";
 import type { ManagerResult, RunManagerOptions } from "../src/agent/manager.js";
+import { AgentRuntime } from "../src/agent/runtime.js";
 import {
   handleInteractiveCommand,
   parseCliArgs,
@@ -77,6 +78,10 @@ class FakeTui implements CliTui {
   handleManagerEvent(): void {}
   handleDelegateEvent(): void {}
   setStatus(): void {}
+  restored: { role: "user" | "manager"; text: string }[][] = [];
+  restoreSession(entries: { role: "user" | "manager"; text: string }[]): void {
+    this.restored.push(entries);
+  }
 }
 
 describe("CLI argument and noninteractive paths", () => {
@@ -237,6 +242,7 @@ describe("interactive integration", () => {
     const options = {
       memory,
       workspace,
+      runtime: new AgentRuntime(config),
       showInfo: (text: string) => { info.push(text); },
       showError: (text: string) => { errors.push(text); },
     };
@@ -262,5 +268,92 @@ describe("interactive integration", () => {
     expect(info.at(-1)).toContain("[user]");
     expect(info.at(-1)).toContain("[project]");
     expect(errors).toEqual([]);
+  });
+
+  test("/model switches the manager and sidekick model at runtime", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    let refreshed = 0;
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      refreshTui: () => { refreshed += 1; },
+      suggestModels: async () => [{ id: "gpt-5.5" }, { id: "deepseek/deepseek-v4-flash" }],
+    };
+
+    // Bare /model shows usage and current models; no switch.
+    expect(await handleInteractiveCommand("/model", options)).toBe(true);
+    expect(info.at(-1)).toContain("Usage: /model manager");
+    expect(info.at(-1)).toContain("fake/manager");
+    expect(runtime.manager.model).toBe("manager");
+    expect(refreshed).toBe(0);
+
+    // /model manager <id> switches and refreshes the TUI.
+    expect(await handleInteractiveCommand("/model manager gpt-5.5", options)).toBe(true);
+    expect(runtime.manager.model).toBe("gpt-5.5");
+    expect(runtime.manager.provider).toBe("fake");
+    expect(info.at(-1)).toContain("manager → fake/gpt-5.5");
+    expect(refreshed).toBe(1);
+
+    // /model sidekick <id> switches the sidekick.
+    expect(await handleInteractiveCommand("/model sidekick deepseek/deepseek-v4-flash", options)).toBe(true);
+    expect(runtime.sidekick.model).toBe("deepseek/deepseek-v4-flash");
+    expect(info.at(-1)).toContain("sidekick → fake/deepseek/deepseek-v4-flash");
+    expect(refreshed).toBe(2);
+
+    // /model <role> alone lists suggestions for that role's provider.
+    expect(await handleInteractiveCommand("/model sidekick", options)).toBe(true);
+    expect(info.at(-1)).toContain("gpt-5.5");
+    expect(info.at(-1)).toContain("deepseek/deepseek-v4-flash");
+    expect(runtime.sidekick.model).toBe("deepseek/deepseek-v4-flash");
+
+    // Unknown role shows usage, does not switch.
+    expect(await handleInteractiveCommand("/model nope whatever", options)).toBe(true);
+    expect(info.at(-1)).toContain("Usage: /model manager");
+    expect(runtime.manager.model).toBe("gpt-5.5");
+    expect(refreshed).toBe(2);
+    expect(errors).toEqual([]);
+  });
+
+  test("/session restores a previous manager session", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    let current = "manager-new";
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      restoreSession: async (id: string) => {
+        if (id === "manager-old") {
+          current = id;
+          return id;
+        }
+        return undefined;
+      },
+    };
+
+    // Bare /session shows usage.
+    expect(await handleInteractiveCommand("/session", options)).toBe(true);
+    expect(info.at(-1)).toContain("Usage: /session <session-id>");
+    expect(current).toBe("manager-new");
+
+    // /session <id> restores an existing session.
+    expect(await handleInteractiveCommand("/session manager-old", options)).toBe(true);
+    expect(current).toBe("manager-old");
+    expect(info.at(-1)).toContain("Restored manager session manager-old");
+
+    // Unknown session shows an error and does not restore.
+    expect(await handleInteractiveCommand("/session manager-none", options)).toBe(true);
+    expect(current).toBe("manager-old");
+    expect(errors.at(-1)).toContain("No manager session found");
   });
 });

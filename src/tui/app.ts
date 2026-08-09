@@ -6,6 +6,7 @@ import {
   type Component,
   type Terminal,
 } from "@mariozechner/pi-tui";
+import type { RoleProviderResolver, SessionSuggestionSource } from "./commands.js";
 import { Footer, type ContextSummary } from "./footer.js";
 import { Header, type HeaderRunState } from "./header.js";
 import {
@@ -43,6 +44,10 @@ export interface AgentTuiOptions {
   workspace: string;
   thinking?: string;
   context?: ContextSummary;
+  /** Live role→provider resolution for the /model dropdown. */
+  roleProviders?: RoleProviderResolver;
+  /** Session suggestions for the /session dropdown. */
+  sessionSource?: SessionSuggestionSource;
   onSubmit?: (line: string) => void | Promise<void>;
   onCancel?: () => void | Promise<void>;
   onExit?: () => void | Promise<void>;
@@ -111,6 +116,8 @@ export class AgentTui {
       thinking: options.thinking,
       context: options.context,
       workspace: options.workspace,
+      roleProviders: options.roleProviders,
+      sessionSource: options.sessionSource,
       managerWorking: false,
       onSubmit: async (line) => {
         this.addUser(line);
@@ -216,6 +223,16 @@ export class AgentTui {
 
   addError(text: string): string {
     return this.addTranscript("error", text);
+  }
+
+  /** Clear the transcript and replay a restored session's history. */
+  restoreSession(entries: { role: "user" | "manager"; text: string }[]): void {
+    this.transcript.clearEntries();
+    for (const entry of entries) {
+      if (entry.role === "user") this.addUser(entry.text);
+      else this.addManager(entry.text);
+    }
+    this.requestRender();
   }
 
   startManagerStream(initial = ""): string {

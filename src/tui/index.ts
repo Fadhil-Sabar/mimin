@@ -5,7 +5,14 @@ export type {
   TuiHost,
 } from "./app.js";
 
-export { SLASH_COMMANDS, INTERACTIVE_COMMAND_NAMES } from "./commands.js";
+export { SLASH_COMMANDS, INTERACTIVE_COMMAND_NAMES, createSlashCommands } from "./commands.js";
+export type { RoleProviderResolver, SessionSuggestionSource } from "./commands.js";
+
+export { suggestModels, suggestCommandCodeModels } from "./model-suggestions.js";
+export type { ModelSuggestion, ModelSuggestionSource } from "./model-suggestions.js";
+
+export { sessionSuggestionsFromStore, sessionToSuggestion } from "./session-suggestions.js";
+export type { SessionSuggestion } from "./session-suggestions.js";
 
 export { dim, green, yellow, cyan } from "./theme.js";
 

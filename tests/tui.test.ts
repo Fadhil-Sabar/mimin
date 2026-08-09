@@ -695,7 +695,7 @@ describe("lightweight pi-tui areas", () => {
     });
     expect(footer.editor).toBeDefined();
     // Typing "/" triggers the editor's autocomplete for the command family.
-    footer.editor.setText("/m");
+    footer.editor.setText("/me");
     footer.editor.handleInput("\t");
     // The suggestion request resolves through the editor's async chain.
     for (let i = 0; i < 6; i += 1) await Promise.resolve();
@@ -722,5 +722,85 @@ describe("lightweight pi-tui areas", () => {
     // global Ctrl-C handling (exit) still works.
     footer.handleInput("\u0003");
     expect(cancelled).toBe(1);
+  });
+
+  test("/model sidekick dropdown lists model IDs and arrow+Tab applies", async () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      roleProviders: () => "commandcode",
+      suggestModels: async () => [
+        { id: "gpt-5.5", description: "200k ctx" },
+        { id: "deepseek/deepseek-v4-flash" },
+        { id: "google/gemini-3.5-flash" },
+      ],
+    });
+    // Typing "/model sidekick" triggers the role-aware model dropdown.
+    footer.editor.setText("");
+    for (const ch of "/model sidekick") {
+      footer.editor.handleInput(ch);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    }
+    expect(footer.editor.isShowingAutocomplete()).toBe(true);
+    // The dropdown lists the provider's model IDs.
+    const menu = textOf(footer.editor.render(80));
+    expect(menu).toContain("gpt-5.5");
+    expect(menu).toContain("deepseek/deepseek-v4-flash");
+    // Arrow down selects the second model; Tab applies it, preserving the role.
+    footer.editor.handleInput("\u001b[B");
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    footer.editor.handleInput("\t");
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(footer.editor.getText()).toBe("/model sidekick deepseek/deepseek-v4-flash");
+  });
+
+  test("/model dropdown filters by any-position substring (sol finds gpt-5.6-sol)", async () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      roleProviders: () => "commandcode",
+      suggestModels: async () => [
+        { id: "gpt-5.5", description: "200k ctx" },
+        { id: "gpt-5.6-sol", description: "1M ctx" },
+        { id: "deepseek/deepseek-v4-flash" },
+      ],
+    });
+    footer.editor.setText("");
+    for (const ch of "/model sidekick sol") {
+      footer.editor.handleInput(ch);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    }
+    expect(footer.editor.isShowingAutocomplete()).toBe(true);
+    const menu = textOf(footer.editor.render(80));
+    // "sol" matches mid-id, not just prefix.
+    expect(menu).toContain("gpt-5.6-sol");
+    expect(menu).not.toContain("gpt-5.5");
+    expect(menu).not.toContain("deepseek");
+  });
+
+  test("/session dropdown lists sessions and arrow+Tab applies the id", async () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      sessionSource: async () => [
+        { id: "manager-aaa", description: "3 messages · 2h ago" },
+        { id: "manager-bbb", description: "1 message · just now" },
+      ],
+    });
+    footer.editor.setText("");
+    for (const ch of "/session") {
+      footer.editor.handleInput(ch);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    }
+    expect(footer.editor.isShowingAutocomplete()).toBe(true);
+    const menu = textOf(footer.editor.render(80));
+    expect(menu).toContain("manager-aaa");
+    expect(menu).toContain("manager-bbb");
+    // Arrow down selects the second session; Tab applies it.
+    footer.editor.handleInput("\u001b[B");
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    footer.editor.handleInput("\t");
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(footer.editor.getText()).toBe("/session manager-bbb");
   });
 });

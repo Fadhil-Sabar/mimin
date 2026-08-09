@@ -10,7 +10,10 @@ import {
   type Focusable,
 } from "@mariozechner/pi-tui";
 import { sanitizeText } from "./header.js";
-import { SLASH_COMMANDS } from "./commands.js";
+import { createSlashCommands, type RoleProviderResolver } from "./commands.js";
+import type { SessionSuggestionSource } from "./commands.js";
+import { suggestModels } from "./model-suggestions.js";
+import type { ModelSuggestionSource } from "./model-suggestions.js";
 import { cyan, dim, green, yellow } from "./theme.js";
 
 export interface ContextUsage {
@@ -30,6 +33,12 @@ export interface FooterOptions {
   managerWorking?: boolean;
   /** Workspace root; drives file-path completion in the editor. */
   workspace?: string;
+  /** Live role→provider resolution for the /model dropdown. */
+  roleProviders?: RoleProviderResolver;
+  /** Model suggestions for the /model dropdown; defaults to pi-ai + Command Code. */
+  suggestModels?: ModelSuggestionSource;
+  /** Session suggestions for the /session dropdown. */
+  sessionSource?: SessionSuggestionSource;
   onSubmit?: (line: string) => void | Promise<void>;
   onCancel?: () => void | Promise<void>;
   onSubmitError?: (error: unknown) => void;
@@ -62,15 +71,23 @@ const EDITOR_THEME = {
 } as const;
 
 /**
- * Wraps the pi-tui CombinedAutocompleteProvider so slash-command items apply
- * their bare name (the provider prepends "/" itself, which would otherwise
- * produce "//memory"). The menu still shows the "/"-prefixed labels.
+ * Wraps the pi-tui CombinedAutocompleteProvider so slash commands work fully:
+ * - Command-name items apply their bare name (the provider prepends "/"
+ *   itself, which would otherwise produce "//memory").
+ * - Argument completions after "/command " work even on Tab (the base
+ *   provider skips its slash branch when force is set) and when the
+ *   completion returns a Promise (the base provider rejects Promises).
  */
 function slashAwareProvider(
   commands: (AutocompleteItem | import("@mariozechner/pi-tui").SlashCommand)[] | undefined,
   workspace: string,
 ): AutocompleteProvider {
   const base = new CombinedAutocompleteProvider(commands, workspace) as unknown as AutocompleteProvider;
+  const commandMap = new Map<string, AutocompleteItem | import("@mariozechner/pi-tui").SlashCommand>();
+  for (const command of commands ?? []) {
+    const name = "name" in command ? command.name : command.value;
+    commandMap.set(name, command);
+  }
   return {
     async getSuggestions(
       lines: string[],
@@ -78,21 +95,92 @@ function slashAwareProvider(
       cursorCol: number,
       options: { signal: AbortSignal; force?: boolean },
     ): Promise<AutocompleteSuggestions | null> {
-      const suggestions = await base.getSuggestions(lines, cursorLine, cursorCol, options);
-      if (!suggestions) return null;
-      const before = (lines[cursorLine] ?? "").slice(0, cursorCol);
-      const isSlashCommand = before.trimStart().startsWith("/") && !before.trimStart().includes(" ");
-      if (!isSlashCommand) return suggestions;
-      return {
-        ...suggestions,
-        items: suggestions.items.map((item: AutocompleteItem) => ({
-          ...item,
-          value: item.value.replace(/^\//, ""),
-        })),
-      };
+      const currentLine = lines[cursorLine] ?? "";
+      const before = currentLine.slice(0, cursorCol);
+      const trimmed = before.trimStart();
+      if (trimmed.startsWith("/")) {
+        const spaceIndex = trimmed.indexOf(" ");
+        if (spaceIndex === -1) {
+          // Command-name completion (no space yet). Match is fuzzy so "/me"
+          // finds both "/model" and "/memory". "/session" shows its session
+          // dropdown immediately (the argument list is the whole point).
+          const prefix = trimmed.slice(1);
+          if (prefix.startsWith("session")) {
+            const sessionCommand = commandMap.get("/session");
+            const completions = sessionCommand && "getArgumentCompletions" in sessionCommand && sessionCommand.getArgumentCompletions
+              ? await sessionCommand.getArgumentCompletions("")
+              : null;
+            const items = Array.isArray(completions) ? completions : [];
+            if (items.length > 0) return { items, prefix: trimmed };
+          }
+          const items = [...commandMap.entries()]
+            .map(([name, command]) => {
+              const hint = "argumentHint" in command && command.argumentHint ? command.argumentHint : undefined;
+              const desc = "description" in command && command.description ? command.description : "";
+              const fullDesc = hint ? (desc ? `${hint} — ${desc}` : hint) : desc;
+              return { name, label: name, ...(fullDesc ? { description: fullDesc } : {}) };
+            })
+            .filter((item) => item.name.slice(1).includes(prefix))
+            .map((item) => ({
+              value: item.name.replace(/^\//, ""),
+              label: item.label,
+              ...(item.description ? { description: item.description } : {}),
+            }));
+          if (items.length === 0) return null;
+          return { items, prefix: trimmed };
+        }
+        // Argument completion after "/command ".
+        const commandName = trimmed.slice(1, spaceIndex);
+        const argumentText = trimmed.slice(spaceIndex + 1);
+        const command = commandMap.get(`/${commandName}`);
+        const completions = command && "getArgumentCompletions" in command && command.getArgumentCompletions
+          ? await command.getArgumentCompletions(argumentText)
+          : null;
+        // The command returns items that already match the argument text; do
+        // not re-filter by the raw argument (a role name like "sidekick " must
+        // not drop model IDs, and a model prefix like "gpt" should narrow).
+        const items = Array.isArray(completions) ? completions : [];
+        if (items.length === 0) return null;
+        return { items, prefix: argumentText };
+      }
+      return base.getSuggestions(lines, cursorLine, cursorCol, options);
     },
-    applyCompletion: (lines, cursorLine, cursorCol, item, prefix) =>
-      base.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+    applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
+      const currentLine = lines[cursorLine] ?? "";
+      const before = currentLine.slice(0, cursorCol);
+      // When completing a model ID after "/model <role>", keep the role
+      // ("/model sidekick gpt-5.5"), otherwise the generic completion would
+      // replace the role with the model id.
+      const roleMatch = before.match(/^(\s*\/model\s+(?:manager|sidekick))(\s*)(.*)$/);
+      if (roleMatch?.[1] !== undefined) {
+        const prefixEnd = roleMatch[1].length + (roleMatch[2]?.length ?? 0);
+        const separator = (roleMatch[2]?.length ?? 0) > 0 ? "" : " ";
+        const newLine = `${before.slice(0, prefixEnd)}${separator}${item.value}${currentLine.slice(cursorCol)}`;
+        const newLines = [...lines];
+        newLines[cursorLine] = newLine;
+        return {
+          lines: newLines,
+          cursorLine,
+          cursorCol: prefixEnd + separator.length + item.value.length,
+        };
+      }
+      // When completing a session ID from "/session" (command name shown as
+      // the dropdown trigger), replace the whole command with "/session <id>".
+      const sessionTrigger = before.match(/^(\s*\/session\s*)$/);
+      if (sessionTrigger?.[1] !== undefined) {
+        const newLine = `/session ${item.value}${currentLine.slice(cursorCol)}`;
+        const newLines = [...lines];
+        newLines[cursorLine] = newLine;
+        return {
+          lines: newLines,
+          cursorLine,
+          cursorCol: "/session ".length + item.value.length,
+        };
+      }
+      // /session <id> after the command token: the generic argument
+      // completion replaces the id correctly.
+      return base.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+    },
     shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
       base.shouldTriggerFileCompletion
         ? base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol)
@@ -136,9 +224,11 @@ export class Footer implements Component, Focusable {
       EDITOR_THEME as never,
       { autocompleteMaxVisible: 6 },
     );
+    const suggest = options.suggestModels ?? suggestModels;
+    const providerOf = options.roleProviders ?? (() => "commandcode");
     this.editor.setAutocompleteProvider(
       slashAwareProvider(
-        SLASH_COMMANDS as never,
+        createSlashCommands(suggest, providerOf, options.sessionSource) as never,
         sanitizeText(options.workspace ?? "", false) || ".",
       ),
     );

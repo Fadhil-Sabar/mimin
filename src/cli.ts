@@ -2,6 +2,7 @@ import { join, resolve } from "node:path";
 import type { Message } from "@mariozechner/pi-ai";
 import type { ManagerResult, RunManagerOptions } from "./agent/manager.js";
 import { runManager } from "./agent/manager.js";
+import { AgentRuntime } from "./agent/runtime.js";
 import type { AgentEvent } from "./agent/types.js";
 import type { AgentConfig } from "./config.js";
 import { ConfigValidationError, loadConfig } from "./config.js";
@@ -12,6 +13,9 @@ import { AgentTui } from "./tui/app.js";
 import type { AgentTuiOptions, LocalManagerEvent } from "./tui/app.js";
 import { INTERACTIVE_COMMAND_NAMES } from "./tui/commands.js";
 import type { ContextSummary } from "./tui/footer.js";
+import { sessionSuggestionsFromStore } from "./tui/session-suggestions.js";
+import type { ModelSuggestionSource } from "./tui/model-suggestions.js";
+import { suggestModels } from "./tui/model-suggestions.js";
 import type { LocalDelegateEvent } from "./tui/sidekick.js";
 import { sanitizeText } from "./tui/header.js";
 
@@ -43,7 +47,9 @@ export interface CliTui {
   addManager(text: string): string;
   handleManagerEvent(event: LocalManagerEvent): void;
   handleDelegateEvent(event: LocalDelegateEvent): void;
-  setStatus(update: { context?: ContextSummary; turn?: number }): void;
+  setStatus(update: { context?: ContextSummary; turn?: number; managerModel?: string }): void;
+  /** Clear the transcript and replay a restored session's history. */
+  restoreSession(entries: { role: "user" | "manager"; text: string }[]): void;
 }
 
 export interface CliDependencies {
@@ -55,13 +61,22 @@ export interface CliDependencies {
   createSessionStore?: (config: AgentConfig) => SessionStore;
   createMemoryStore?: (config: AgentConfig, workspace: string) => MemoryStore;
   createTui?: (options: AgentTuiOptions) => CliTui;
+  /** Injectable model suggestions for /model (defaults to pi-ai + Command Code). */
+  suggestModels?: ModelSuggestionSource;
 }
 
 export interface InteractiveCommandOptions {
   memory: MemoryStore;
   workspace: string;
+  runtime: AgentRuntime;
   showInfo(text: string): void;
   showError(text: string): void;
+  /** Update the TUI header/footer model chips after a switch. */
+  refreshTui?(): void;
+  /** Injectable model suggestions for /model; defaults to pi-ai + Command Code. */
+  suggestModels?: ModelSuggestionSource;
+  /** Restore a previous manager session: load its history and switch to it. */
+  restoreSession?(sessionId: string): Promise<string | undefined>;
 }
 
 const USAGE = `Usage: agent [--continue] ["task"]
@@ -151,6 +166,82 @@ function compactMemoryResults(results: MemorySearchResult[]): string {
   ).join("\n");
 }
 
+const ROLES = ["manager", "sidekick"] as const;
+type ModelRole = (typeof ROLES)[number];
+
+function modelRole(value: string | undefined): ModelRole | undefined {
+  return ROLES.find((role) => role === value);
+}
+
+/** Switch the manager or sidekick model at runtime (interactive only). */
+async function handleModelCommand(
+  line: string,
+  options: InteractiveCommandOptions,
+): Promise<void> {
+  const rest = line.slice("/model".length).trim();
+  const parts = rest.split(/\s+/).filter(Boolean);
+  const first = parts[0];
+  const role = modelRole(first);
+  if (role === undefined) {
+    const current = roleLabel(options.runtime.manager) + " / " + roleLabel(options.runtime.sidekick);
+    options.showInfo([
+      "Usage: /model manager <model-id> or /model sidekick <model-id>",
+      `Current: manager ${roleLabel(options.runtime.manager)} · sidekick ${roleLabel(options.runtime.sidekick)}`,
+    ].join("\n"));
+    return;
+  }
+  const modelId = parts.slice(1).join(" ").trim();
+  if (!modelId) {
+    const suggestions = await (options.suggestModels ?? suggestModels)(options.runtime[role].provider);
+    const list = suggestions.length > 0
+      ? suggestions.map((item) => `  ${item.id}${item.description ? ` (${item.description})` : ""}`).join("\n")
+      : "  (no suggestions available)";
+    options.showInfo([
+      `Usage: /model ${role} <model-id>`,
+      `Current ${role} model: ${roleLabel(options.runtime[role])}`,
+      `Available for provider ${options.runtime[role].provider}:`,
+      list,
+    ].join("\n"));
+    return;
+  }
+  const previous = roleLabel(options.runtime[role]);
+  options.runtime[role] = {
+    ...options.runtime[role],
+    model: modelId,
+  };
+  options.showInfo(`Switched ${role} model: ${previous} → ${roleLabel(options.runtime[role])}`);
+  options.refreshTui?.();
+}
+
+function roleLabel(role: { provider: string; model: string }): string {
+  return `${role.provider}/${role.model}`;
+}
+
+/** Restore a previous manager session (interactive only). */
+async function handleSessionCommand(
+  line: string,
+  options: InteractiveCommandOptions,
+): Promise<void> {
+  const sessionId = line.slice("/session".length).trim();
+  if (!sessionId) {
+    options.showInfo([
+      "Usage: /session <session-id>",
+      "Use Tab to pick from the dropdown of previous sessions.",
+    ].join("\n"));
+    return;
+  }
+  if (!options.restoreSession) {
+    options.showError("Session restore is unavailable in this context.");
+    return;
+  }
+  const restored = await options.restoreSession(sessionId);
+  if (!restored) {
+    options.showError(`No manager session found with id ${terminalText(sessionId, 100)}.`);
+    return;
+  }
+  options.showInfo(`Restored manager session ${terminalText(restored, 100)}.`);
+}
+
 /** Intercept the deliberately tiny interactive command family before model invocation. */
 export async function handleInteractiveCommand(
   line: string,
@@ -161,6 +252,14 @@ export async function handleInteractiveCommand(
       "Interactive commands:",
       ...INTERACTIVE_COMMAND_NAMES,
     ].join("\n"));
+    return true;
+  }
+  if (line === "/model" || line.startsWith("/model ")) {
+    await handleModelCommand(line, options);
+    return true;
+  }
+  if (line === "/session" || line.startsWith("/session ")) {
+    await handleSessionCommand(line, options);
     return true;
   }
   if (!line.startsWith("/memory")) return false;
@@ -285,6 +384,7 @@ async function runInteractive(
   manager: (options: RunManagerOptions) => Promise<ManagerResult>,
   createTui: (options: AgentTuiOptions) => CliTui,
   io: CliIo,
+  suggestModelsSource?: ModelSuggestionSource,
 ): Promise<number> {
   let sessionId = shouldContinue ? await newestManagerSession(store) : undefined;
   if (shouldContinue && !sessionId) {
@@ -293,6 +393,7 @@ async function runInteractive(
   }
   if (!sessionId) sessionId = (await store.createSession("manager")).id;
 
+  const runtime = new AgentRuntime(config);
   let app: CliTui | undefined;
   let running = false;
   let activeController: AbortController | undefined;
@@ -313,6 +414,8 @@ async function runInteractive(
     managerModel: `${config.manager.provider}/${config.manager.model}`,
     workspace,
     thinking: config.manager.thinking,
+    roleProviders: (role) => runtime[role].provider,
+    sessionSource: sessionSuggestionsFromStore(store),
     onExit: () => finish(0),
     onCancel: () => {
       if (activeController) {
@@ -324,8 +427,38 @@ async function runInteractive(
       if (await handleInteractiveCommand(line, {
         memory,
         workspace,
+        runtime,
         showInfo: (text) => { app?.addInfo(text); },
         showError: (text) => { app?.addError(text); },
+        refreshTui: () => {
+          app?.setStatus({
+            managerModel: `${runtime.manager.provider}/${runtime.manager.model}`,
+          });
+        },
+        suggestModels: suggestModelsSource,
+        restoreSession: async (id) => {
+          try {
+            const session = await store.loadSession("manager", id);
+            const entries: { role: "user" | "manager"; text: string }[] = [];
+            for (const message of session.messages) {
+              if (message.role === "user" && typeof message.content === "string") {
+                entries.push({ role: "user", text: message.content });
+              } else if (message.role === "assistant") {
+                const text = message.content
+                  .filter((block) => block.type === "text")
+                  .map((block) => block.text)
+                  .join("\n")
+                  .trim();
+                if (text) entries.push({ role: "manager", text });
+              }
+            }
+            sessionId = id;
+            app?.restoreSession(entries);
+            return id;
+          } catch {
+            return undefined;
+          }
+        },
       })) return;
       if (running) {
         app?.addError("A manager run is already active; wait or press Escape to cancel it.");
@@ -339,7 +472,7 @@ async function runInteractive(
         const result = await manager({
           input: line,
           workspace,
-          config,
+          config: runtime.toConfig(),
           sessionStore: store,
           sessionId,
           signal: controller.signal,
@@ -434,6 +567,7 @@ export async function runCli(
       manager,
       dependencies.createTui ?? ((options) => new AgentTui(options)),
       io,
+      dependencies.suggestModels,
     );
   } catch (error) {
     io.stderr(`Could not start interactive mode: ${terminalText(error instanceof Error ? error.message : error, 2_000)}\n`);
