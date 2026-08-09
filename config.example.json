@@ -1,0 +1,13 @@
+{
+  "dataDir": "~/.mimin/data",
+  "manager": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "thinking": "medium"
+  },
+  "sidekick": {
+    "provider": "anthropic",
+    "model": "claude-sonnet-4-6",
+    "thinking": "low"
+  }
+}

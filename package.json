@@ -1,0 +1,28 @@
+{
+  "name": "mimin",
+  "version": "0.1.0",
+  "description": "Minimal manager/sidekick coding agent for Bun",
+  "private": true,
+  "type": "module",
+  "module": "src/index.ts",
+  "bin": {
+    "agent": "dist/index.js"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/index.ts --target bun --outfile dist/index.js --banner='#!/usr/bin/env bun'",
+    "compile": "bun build --compile src/index.ts --outfile dist/agent"
+  },
+  "dependencies": {
+    "@mariozechner/pi-ai": "^0.73.1",
+    "@mariozechner/pi-tui": "^0.73.1",
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.14",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,29 @@
+# dependencies
+node_modules/
+
+# build output
+out/
+dist/
+*.tgz
+
+# test and coverage output
+coverage/
+*.lcov
+
+# local configuration and data
+.mimin/
+
+# logs and temporary files
+logs/
+*.log
+*.tsbuildinfo
+.cache/
+
+# environment files
+.env
+.env.*.local
+
+# editor files
+.idea/
+.vscode/
+.DS_Store

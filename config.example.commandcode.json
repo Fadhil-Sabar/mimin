@@ -1,0 +1,13 @@
+{
+  "dataDir": "~/.mimin/data",
+  "manager": {
+    "provider": "commandcode",
+    "model": "gpt-5.5",
+    "thinking": "medium"
+  },
+  "sidekick": {
+    "provider": "commandcode",
+    "model": "deepseek/deepseek-v4-flash",
+    "thinking": "low"
+  }
+}
