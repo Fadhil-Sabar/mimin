@@ -51,6 +51,8 @@ export type SidekickActivityEvent =
       sessionId: string;
       tool: string;
       timestamp: number;
+      /** Whitelisted safe detail parsed from toolCall arguments (path/command). */
+      detail?: string;
     }
   | {
       type: "tool_finished";
@@ -59,6 +61,8 @@ export type SidekickActivityEvent =
       ok: boolean;
       path?: string;
       timestamp: number;
+      /** Whitelisted safe detail parsed from toolCall arguments (path/command). */
+      detail?: string;
     }
   | {
       type: "sidekick_finished";
@@ -259,6 +263,22 @@ function detailPath(details: unknown): string | undefined {
   return typeof path === "string" && path.length > 0 ? path : undefined;
 }
 
+/**
+ * Whitelisted safe detail from toolCall arguments: path for read/edit,
+ * command for bash. Never returns raw output.
+ */
+function toolCallDetail(name: string, arguments_: Record<string, unknown>): string | undefined {
+  if (name === "read" || name === "edit") {
+    const path = arguments_.path;
+    return typeof path === "string" && path.length > 0 ? path : undefined;
+  }
+  if (name === "bash") {
+    const command = arguments_.command;
+    return typeof command === "string" && command.length > 0 ? command : undefined;
+  }
+  return undefined;
+}
+
 /** Run one isolated implementation conversation using the generic agent loop. */
 export async function runSidekick(
   options: RunSidekickOptions,
@@ -313,6 +333,10 @@ export async function runSidekick(
             type: "tool_started",
             sessionId: session.id,
             tool: event.toolCall.name,
+            detail: toolCallDetail(
+              event.toolCall.name,
+              event.toolCall.arguments as Record<string, unknown>,
+            ),
             timestamp: now(),
           });
         } else if (event.type === "tool_end") {
@@ -326,6 +350,10 @@ export async function runSidekick(
             tool: event.toolCall.name,
             ok: !event.result.isError,
             ...(path ? { path } : {}),
+            detail: toolCallDetail(
+              event.toolCall.name,
+              event.toolCall.arguments as Record<string, unknown>,
+            ),
             timestamp: now(),
           });
         }

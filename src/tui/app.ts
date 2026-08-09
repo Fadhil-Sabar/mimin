@@ -7,13 +7,14 @@ import {
   type Terminal,
 } from "@mariozechner/pi-tui";
 import { Footer, type ContextSummary } from "./footer.js";
-import { Header } from "./header.js";
+import { Header, type HeaderRunState } from "./header.js";
 import {
   SidekickActivity,
   type LocalDelegateEvent,
   type LocalSidekickActivity,
   type LocalSidekickResult,
 } from "./sidekick.js";
+import { ToolActivity, type LocalToolEvent } from "./tool-activity.js";
 import { Transcript, type TranscriptRole } from "./transcript.js";
 
 export interface TuiHost {
@@ -45,10 +46,19 @@ export interface AgentTuiOptions {
   onSubmit?: (line: string) => void | Promise<void>;
   onCancel?: () => void | Promise<void>;
   onExit?: () => void | Promise<void>;
+  onToggleSidekick?: (identifier: number | string) => void;
   terminal?: Terminal;
   /** Test seam. When supplied, no ProcessTerminal is constructed. */
   tui?: TuiHost;
 }
+
+/** Heartbeat interval for live elapsed tickers while a run is active. */
+const TICK_INTERVAL_MS = 1_000;
+/** One page of transcript rows scrolled per PageUp/PageDown press. */
+const SCROLL_PAGE = 12;
+
+const SECOND_CONFIRMATION =
+  "Ctrl-C again to exit (Escape cancels the active run).";
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null
@@ -71,26 +81,37 @@ export class AgentTui {
   readonly header: Header;
   readonly transcript: Transcript;
   readonly sidekicks: SidekickActivity;
+  readonly tools: ToolActivity;
   readonly footer: Footer;
 
   private activeManagerStream?: string;
+  private runState: HeaderRunState = "idle";
   private started = false;
+  private tickTimer?: Timer;
+  private exitArmed = false;
+  private exitArmedAt = 0;
   private readonly onExit?: () => void | Promise<void>;
+  private readonly onToggleSidekick?: (identifier: number | string) => void;
 
   constructor(options: AgentTuiOptions) {
     this.tui = options.tui ?? new TUI(options.terminal ?? new ProcessTerminal());
     this.onExit = options.onExit;
+    this.onToggleSidekick = options.onToggleSidekick;
     this.header = new Header({
       product: options.product,
       managerModel: options.managerModel,
       workspace: options.workspace,
+      thinking: options.thinking,
     });
     this.transcript = new Transcript();
     this.sidekicks = new SidekickActivity(options.workspace);
+    this.tools = new ToolActivity();
     this.footer = new Footer({
       managerModel: options.managerModel,
       thinking: options.thinking,
       context: options.context,
+      workspace: options.workspace,
+      managerWorking: false,
       onSubmit: async (line) => {
         this.addUser(line);
         await options.onSubmit?.(line);
@@ -102,16 +123,38 @@ export class AgentTui {
       requestRender: () => this.requestRender(),
     });
 
-    // Deliberately exactly four top-level areas.
+    // Five top-level areas: header, transcript, tool rows, sidekick cards, footer.
     this.tui.addChild(this.header);
     this.tui.addChild(this.transcript);
+    this.tui.addChild(this.tools);
     this.tui.addChild(this.sidekicks);
     this.tui.addChild(this.footer);
     this.tui.setFocus(this.footer);
     this.tui.addInputListener((data) => {
+      if (matchesKey(data, Key.pageUp)) {
+        this.transcript.scrollUp(SCROLL_PAGE);
+        this.requestRender();
+        return { consume: true };
+      }
+      if (matchesKey(data, Key.pageDown)) {
+        this.transcript.scrollDown(SCROLL_PAGE);
+        this.requestRender();
+        return { consume: true };
+      }
+      if (matchesKey(data, Key.end)) {
+        this.transcript.scrollToBottom();
+        this.requestRender();
+        return { consume: true };
+      }
       if (!matchesKey(data, Key.ctrl("c"))) return undefined;
-      void this.onExit?.();
-      this.stop();
+      if (this.runState === "idle" || (this.exitArmed && Date.now() - this.exitArmedAt < 1_500)) {
+        void this.onExit?.();
+        this.stop();
+        return { consume: true };
+      }
+      this.exitArmed = true;
+      this.exitArmedAt = Date.now();
+      this.addInfo(SECOND_CONFIRMATION);
       return { consume: true };
     });
   }
@@ -119,12 +162,22 @@ export class AgentTui {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.tickTimer = setInterval(() => {
+      if (this.runState === "idle") return;
+      this.header.invalidate();
+      this.sidekicks.invalidate();
+      this.requestRender(true);
+    }, TICK_INTERVAL_MS);
     this.tui.start();
   }
 
   stop(): void {
     if (!this.started) return;
     this.started = false;
+    if (this.tickTimer) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = undefined;
+    }
     this.tui.stop();
   }
 
@@ -137,6 +190,7 @@ export class AgentTui {
     return [
       ...this.header.render(width),
       ...this.transcript.render(width),
+      ...this.tools.render(width),
       ...this.sidekicks.render(width),
       ...this.footer.render(width),
     ];
@@ -195,30 +249,55 @@ export class AgentTui {
     return finished;
   }
 
-  /** Map text-only stream events; thinking/tool payloads are intentionally ignored. */
+  /** Map text-only stream events; thinking payloads are intentionally ignored. */
   handleManagerEvent(source: LocalManagerEvent): void {
     const nested = source.type === "model_event" ? record(source.event) : undefined;
     const event = nested ?? source as unknown as Record<string, unknown>;
     const type = typeof event.type === "string" ? event.type : "";
     if (type === "text_start") {
+      this.setRunState("running");
       if (!this.activeManagerStream) this.startManagerStream();
     } else if (type === "text_delta" && typeof event.delta === "string") {
+      if (!this.activeManagerStream) this.setRunState("running");
       this.appendManagerDelta(event.delta);
     } else if (type === "text_end") {
+      this.setRunState("working");
       this.finishManagerStream(
         typeof event.content === "string" ? event.content : undefined,
       );
     } else if (type === "done") {
+      this.setRunState("idle");
       this.finishManagerStream();
     } else if (type === "error") {
+      this.setRunState("idle");
       this.finishManagerStream();
       this.addError(managerError(event.error));
+    } else if (type === "tool_start" || type === "tool_end") {
+      this.setRunState("working");
+      this.tools.apply(event as unknown as LocalToolEvent);
+      this.requestRender();
     }
   }
 
   handleDelegateEvent(event: LocalDelegateEvent): void {
     this.sidekicks.apply(event);
+    this.updateSidekickStatus();
     this.requestRender();
+  }
+
+  /** Mirror the running-sidekick count into the footer without touching cards. */
+  private updateSidekickStatus(): void {
+    const working = this.sidekicks.workingCount();
+    this.footer.setStatus({ sidekickWorking: working });
+  }
+
+  /** Set the header run state and mirror it to the footer spinner. */
+  private setRunState(state: HeaderRunState): void {
+    if (this.runState === state) return;
+    this.runState = state;
+    if (state === "idle") this.header.setTurn(0);
+    this.header.setRunState(state);
+    this.footer.setStatus({ managerWorking: state !== "idle" });
   }
 
   delegateStarted(index: number, taskCount = 1): void {
@@ -244,22 +323,35 @@ export class AgentTui {
     this.requestRender();
   }
 
-  toggleSidekick(identifier: number | string): boolean {
-    const expanded = this.sidekicks.toggle(identifier);
-    this.requestRender();
-    return expanded;
-  }
-
   setStatus(update: {
     managerModel?: string;
     thinking?: string;
     context?: ContextSummary;
+    turn?: number;
   }): void {
     if (update.managerModel !== undefined) {
       this.header.setManagerModel(update.managerModel);
     }
+    if (update.thinking !== undefined) {
+      this.header.setThinking(update.thinking);
+    }
+    if (update.turn !== undefined) {
+      this.header.setTurn(update.turn);
+    }
     this.footer.setStatus(update);
     this.requestRender();
+  }
+
+  setTurn(turn: number): void {
+    this.header.setTurn(turn);
+    this.requestRender();
+  }
+
+  toggleSidekick(identifier: number | string): boolean {
+    const expanded = this.sidekicks.toggle(identifier);
+    this.onToggleSidekick?.(identifier);
+    this.requestRender();
+    return expanded;
   }
 }
 

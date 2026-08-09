@@ -5,6 +5,10 @@ export type {
   TuiHost,
 } from "./app.js";
 
+export { SLASH_COMMANDS, INTERACTIVE_COMMAND_NAMES } from "./commands.js";
+
+export { dim, green, yellow, cyan } from "./theme.js";
+
 export { Footer } from "./footer.js";
 export type {
   ContextSummary,
@@ -25,3 +29,6 @@ export type {
 
 export { Transcript } from "./transcript.js";
 export type { TranscriptEntry, TranscriptRole } from "./transcript.js";
+
+export { ToolActivity } from "./tool-activity.js";
+export type { LocalToolEvent } from "./tool-activity.js";

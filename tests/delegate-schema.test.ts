@@ -312,3 +312,61 @@ describe("delegate contract rejection", () => {
     expect(arrayBranch.maxItems).toBe(100);
   });
 });
+
+describe("delegate event presentation metadata", () => {
+  test("delegation_started and delegation_finished carry task and model", async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const delegate = createDelegateTool({
+      sidekick: {
+        workspace: "/tmp",
+        config: { provider: "commandcode", model: "gpt-5.5", thinking: "low" },
+      },
+      run: async (task) => result("complete", task),
+      onEvent: (event) => {
+        events.push(event as unknown as Record<string, unknown>);
+      },
+    });
+    await execute(delegate, { task: "implement feature" });
+
+    const started = events.find((event) => event.type === "delegation_started");
+    const finished = events.find((event) => event.type === "delegation_finished");
+    expect(started).toMatchObject({
+      type: "delegation_started",
+      index: 0,
+      taskCount: 1,
+      task: "implement feature",
+      model: "gpt-5.5",
+    });
+    expect(finished).toMatchObject({
+      type: "delegation_finished",
+      index: 0,
+      taskCount: 1,
+      task: "implement feature",
+      model: "gpt-5.5",
+      result: { status: "complete", summary: "implement feature" },
+    });
+  });
+
+  test("batch delegation carries per-task titles and the sidekick model", async () => {
+    const events: Array<Record<string, unknown>> = [];
+    const delegate = createDelegateTool({
+      sidekick: {
+        workspace: "/tmp",
+        config: { provider: "commandcode", model: "deepseek-v4-flash", thinking: "low" },
+      },
+      run: async (task) => result("complete", task),
+      onEvent: (event) => {
+        events.push(event as unknown as Record<string, unknown>);
+      },
+    });
+    await execute(delegate, { task: ["a", "b"] });
+
+    const started = events.filter((event) => event.type === "delegation_started");
+    expect(started).toHaveLength(2);
+    expect(started[0]).toMatchObject({ index: 0, task: "a", model: "deepseek-v4-flash" });
+    expect(started[1]).toMatchObject({ index: 1, task: "b", model: "deepseek-v4-flash" });
+    // sidekick_activity events are unchanged (no new fields).
+    const activity = events.find((event) => event.type === "sidekick_activity");
+    expect(activity).toBeUndefined();
+  });
+});

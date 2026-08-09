@@ -23,7 +23,15 @@ export type SidekickRunner = (
 ) => Promise<SidekickResult>;
 
 export type DelegateEvent =
-  | { type: "delegation_started"; index: number; taskCount: number }
+  | {
+      type: "delegation_started";
+      index: number;
+      taskCount: number;
+      /** Presentation metadata: the task title sent to this sidekick. */
+      task?: string;
+      /** Presentation metadata: the sidekick model id. */
+      model?: string;
+    }
   | {
       type: "sidekick_activity";
       index: number;
@@ -35,6 +43,10 @@ export type DelegateEvent =
       index: number;
       taskCount: number;
       result: SidekickResult;
+      /** Presentation metadata: the task title sent to this sidekick. */
+      task?: string;
+      /** Presentation metadata: the sidekick model id. */
+      model?: string;
     };
 
 export type DelegateEventCallback = (
@@ -177,6 +189,7 @@ async function runBounded(
   runner: SidekickRunner,
   signal: AbortSignal | undefined,
   onEvent: DelegateEventCallback | undefined,
+  presentation?: { model?: string },
 ): Promise<SidekickResult[]> {
   const results = new Array<SidekickResult>(tasks.length);
   let nextIndex = 0;
@@ -191,6 +204,8 @@ async function runBounded(
         type: "delegation_started",
         index,
         taskCount: tasks.length,
+        task,
+        model: presentation?.model,
       });
       let result: SidekickResult;
       try {
@@ -216,6 +231,8 @@ async function runBounded(
         index,
         taskCount: tasks.length,
         result,
+        task,
+        model: presentation?.model,
       });
     }
   };
@@ -250,6 +267,7 @@ export function createDelegateTool(
         runner,
         context.signal,
         options.onEvent,
+        { model: options.sidekick?.config.model },
       );
       const compact = isSingle ? results[0] : results;
       return {

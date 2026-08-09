@@ -10,6 +10,7 @@ import type { MemorySearchResult } from "./memory/search.js";
 import { SessionStore } from "./session/session.js";
 import { AgentTui } from "./tui/app.js";
 import type { AgentTuiOptions, LocalManagerEvent } from "./tui/app.js";
+import { INTERACTIVE_COMMAND_NAMES } from "./tui/commands.js";
 import type { ContextSummary } from "./tui/footer.js";
 import type { LocalDelegateEvent } from "./tui/sidekick.js";
 import { sanitizeText } from "./tui/header.js";
@@ -42,7 +43,7 @@ export interface CliTui {
   addManager(text: string): string;
   handleManagerEvent(event: LocalManagerEvent): void;
   handleDelegateEvent(event: LocalDelegateEvent): void;
-  setStatus(update: { context?: ContextSummary }): void;
+  setStatus(update: { context?: ContextSummary; turn?: number }): void;
 }
 
 export interface CliDependencies {
@@ -74,10 +75,7 @@ Commands:
   agent --continue "task"  Resume it for one direct task
 
 Interactive commands:
-  /memory add user <text>
-  /memory add project <text>
-  /memory search <query>
-  /help
+  ${INTERACTIVE_COMMAND_NAMES.join("\n  ")}
 `;
 
 function defaultIo(): CliIo {
@@ -161,10 +159,7 @@ export async function handleInteractiveCommand(
   if (line === "/help") {
     options.showInfo([
       "Interactive commands:",
-      "/memory add user <text>",
-      "/memory add project <text>",
-      "/memory search <query>",
-      "/help",
+      ...INTERACTIVE_COMMAND_NAMES,
     ].join("\n"));
     return true;
   }
@@ -358,7 +353,10 @@ async function runInteractive(
             ) receivedManagerText = true;
             if (event.type === "message_appended") {
               const context = contextFromMessage(event.message);
-              if (context) app?.setStatus({ context });
+              app?.setStatus({
+                context,
+                turn: event.turn,
+              });
             }
           },
           onDelegateEvent: (event) => app?.handleDelegateEvent(event),
