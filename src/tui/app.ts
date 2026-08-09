@@ -317,6 +317,22 @@ export class AgentTui {
     this.footer.setStatus({ managerWorking: state !== "idle" });
   }
 
+  /**
+   * Signal a run is starting/finishing immediately, before any model event
+   * arrives. The provider round-trip can take a moment; without this the
+   * header/footer stay idle during the request.
+   */
+  setRunning(running: boolean): void {
+    this.setRunState(running ? "working" : "idle");
+    this.requestRender();
+  }
+
+  /** Clear the footer editor's draft input. */
+  clearInput(): void {
+    this.footer.editor.setText("");
+    this.requestRender();
+  }
+
   delegateStarted(index: number, taskCount = 1): void {
     this.sidekicks.start(index, taskCount);
     this.requestRender();

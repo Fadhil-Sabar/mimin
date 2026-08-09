@@ -226,14 +226,38 @@ export async function runAgent<TApi extends Api = Api>(
         responseStream = piStream(options.model, context, providerOptions);
       }
 
-      for await (const event of responseStream) {
-        await emit(options.onEvent, { type: "model_event", turn: turns, event });
+      // Consume the stream, racing each next() against the abort signal so a
+      // stuck provider (no events, never ends) still aborts promptly.
+      const iterator = responseStream[Symbol.asyncIterator]();
+      const abortPromise = new Promise<never>((_, reject) => {
+        if (signal?.aborted) {
+          reject(new Error("Agent run aborted"));
+          return;
+        }
+        signal?.addEventListener("abort", () => {
+          reject(new Error("Agent run aborted"));
+        }, { once: true });
+      });
+      try {
+        while (true) {
+          const next = await Promise.race([
+            iterator.next(),
+            abortPromise,
+          ]);
+          if (next.done) break;
+          await emit(options.onEvent, { type: "model_event", turn: turns, event: next.value });
+        }
+      } finally {
+        // Do not await iterator.return()/result(): a stuck provider never
+        // settles them, and the abort must return promptly.
+        void iterator.return?.();
       }
       assistant = await responseStream.result();
     } catch (error) {
       // A provider may expose a final partial message through result() even
       // when iteration reports an exception. Persist it when available.
-      if (responseStream) {
+      // On abort, skip this entirely: a stuck provider never settles result().
+      if (responseStream && !signal?.aborted) {
         try {
           const partial = await responseStream.result();
           if (partial) {
@@ -281,6 +305,9 @@ export async function runAgent<TApi extends Api = Api>(
     }
 
     for (const call of calls) {
+      if (signal?.aborted) {
+        return finish("aborted", { error: "Agent run aborted" });
+      }
       toolCalls += 1;
       await emit(options.onEvent, {
         type: "tool_start",

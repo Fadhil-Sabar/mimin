@@ -187,4 +187,43 @@ describe("runAgent", () => {
     });
     expect(messages).toHaveLength(4);
   });
+
+  test("aborting mid-stream returns aborted promptly without waiting for the provider", async () => {
+    // A stream that yields one delta, then hangs forever (never ends). The
+    // abort check inside the for-await loop must return "aborted" without
+    // waiting for the stream to finish or reject.
+    const streamFactory: AgentStreamFactory = (_model, _context) => {
+      const stream = createAssistantMessageEventStream();
+      const partial = assistant([], "toolUse", 1);
+      stream.push({ type: "text_start", contentIndex: 0, partial });
+      stream.push({
+        type: "text_delta",
+        contentIndex: 0,
+        delta: "partial",
+        partial,
+      });
+      // Deliberately never call stream.end(): a stuck provider.
+      return stream;
+    };
+    const controller = new AbortController();
+    const messages: Message[] = [
+      { role: "user", content: "hello", timestamp: 1 },
+    ];
+
+    const runPromise = runAgent({
+      model,
+      systemPrompt: "Test prompt",
+      messages,
+      stream: streamFactory,
+      maxTurns: 3,
+      signal: controller.signal,
+    });
+
+    // Let the stream yield its first event, then abort.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    const result = await runPromise;
+    expect(result.status).toBe("aborted");
+    expect(result.turns).toBe(1);
+  });
 });

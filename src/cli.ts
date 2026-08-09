@@ -48,6 +48,10 @@ export interface CliTui {
   handleManagerEvent(event: LocalManagerEvent): void;
   handleDelegateEvent(event: LocalDelegateEvent): void;
   setStatus(update: { context?: ContextSummary; turn?: number; managerModel?: string }): void;
+  /** Flip the header/footer run indicator immediately on submit/cancel. */
+  setRunning(running: boolean): void;
+  /** Clear the editor's draft input (idle Escape). */
+  clearInput(): void;
   /** Clear the transcript and replay a restored session's history. */
   restoreSession(entries: { role: "user" | "manager"; text: string }[]): void;
 }
@@ -421,7 +425,10 @@ async function runInteractive(
       if (activeController) {
         activeController.abort();
         app?.addInfo("Cancelling the active manager run…");
+        return;
       }
+      // Idle: Escape clears the draft input.
+      app?.clearInput();
     },
     onSubmit: async (line) => {
       if (await handleInteractiveCommand(line, {
@@ -465,6 +472,7 @@ async function runInteractive(
         return;
       }
       running = true;
+      app?.setRunning(true);
       const controller = new AbortController();
       activeController = controller;
       let receivedManagerText = false;
@@ -507,6 +515,7 @@ async function runInteractive(
       } finally {
         if (activeController === controller) activeController = undefined;
         running = false;
+        app?.setRunning(false);
       }
     },
   });

@@ -78,6 +78,10 @@ class FakeTui implements CliTui {
   handleManagerEvent(): void {}
   handleDelegateEvent(): void {}
   setStatus(): void {}
+  running: boolean | undefined;
+  setRunning(value: boolean): void { this.running = value; }
+  clearInput(): void { this.clearedInput = true; }
+  clearedInput = false;
   restored: { role: "user" | "manager"; text: string }[][] = [];
   restoreSession(entries: { role: "user" | "manager"; text: string }[]): void {
     this.restored.push(entries);
@@ -232,6 +236,43 @@ describe("interactive integration", () => {
     expect(sessions[1]).toBe(sessions[0]);
     expect(fakeTui?.starts).toBe(1);
     expect(fakeTui?.stops).toBe(1);
+  });
+
+  test("Escape cancels an active manager run via the abort signal", async () => {
+    const { workspace, config } = await fixture();
+    let aborted = false;
+    const code = await runCli([], {
+      cwd: workspace,
+      io: captureIo(),
+      loadConfig: async () => config,
+      runManager: async (options) => {
+        // Simulate a long-running manager that only settles on abort.
+        await new Promise<void>((resolve) => {
+          if (options.signal?.aborted) {
+            aborted = true;
+            resolve();
+            return;
+          }
+          options.signal?.addEventListener("abort", () => {
+            aborted = true;
+            resolve();
+          }, { once: true });
+        });
+        return completed(options.sessionId ?? "missing", "never");
+      },
+      createTui: (options) => {
+        return new FakeTui(options, async (callbacks) => {
+          // Fire onSubmit (don't await — it hangs) then Escape cancels.
+          void callbacks.onSubmit?.("slow task");
+          await Bun.sleep(10);
+          await callbacks.onCancel?.();
+          await callbacks.onExit?.();
+        });
+      },
+    });
+
+    expect(code).toBe(0);
+    expect(aborted).toBe(true);
   });
 
   test("explicit memory commands persist, select project scope, and redact secrets", async () => {

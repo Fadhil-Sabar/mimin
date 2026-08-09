@@ -196,6 +196,22 @@ async function runBounded(
 
   const worker = async (): Promise<void> => {
     while (true) {
+      if (signal?.aborted) {
+        // Fill every not-yet-started slot with a blocked result so the
+        // manager never sees nulls for aborted tasks.
+        while (nextIndex < tasks.length) {
+          const index = nextIndex;
+          nextIndex += 1;
+          results[index] = {
+            status: "blocked",
+            summary: "Aborted by the manager.",
+            filesChanged: [],
+            verification: [],
+            sessionId: "unavailable",
+          };
+        }
+        return;
+      }
       const index = nextIndex;
       nextIndex += 1;
       const task = tasks[index];

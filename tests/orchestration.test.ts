@@ -108,18 +108,25 @@ function result(
   };
 }
 
-function executionContext(toolName: string): ToolExecutionContext {
+function executionContext(
+  toolName: string,
+  signal?: AbortSignal,
+): ToolExecutionContext {
   const toolCall: ToolCall = {
     type: "toolCall",
     id: `call-${toolName}`,
     name: toolName,
     arguments: {},
   };
-  return { model, turn: 1, toolCall };
+  return { model, turn: 1, toolCall, ...(signal ? { signal } : {}) };
 }
 
-async function execute(tool: AnyAgentTool, args: Record<string, unknown>) {
-  return tool.execute(args, executionContext(tool.name));
+async function execute(
+  tool: AnyAgentTool,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+) {
+  return tool.execute(args, executionContext(tool.name, signal));
 }
 
 describe("role permission boundaries", () => {
@@ -356,6 +363,35 @@ describe("manager correction and bounded delegation", () => {
       "result-5",
       "result-6",
     ]);
+  });
+
+  test("aborting the manager signal stops the delegate from dispatching further tasks", async () => {
+    const controller = new AbortController();
+    const started: number[] = [];
+    const delegate = createDelegateTool({
+      maxConcurrency: 3,
+      run: async (_task, context) => {
+        started.push(context.index);
+        await Bun.sleep(50);
+        return result("complete", `session-${context.index}`, `result-${context.index}`);
+      },
+    });
+
+    const outputPromise = execute(
+      delegate,
+      { task: Array.from({ length: 9 }, (_, index) => `task-${index}`) },
+      controller.signal,
+    );
+    // Let the first three start, then abort.
+    await Bun.sleep(10);
+    controller.abort();
+    const output = await outputPromise;
+    if (typeof output === "string") throw new Error("expected structured tool output");
+    const parsed = JSON.parse(output.text) as SidekickResult[];
+
+    // Aborted tasks are never dispatched; the workers stop after the signal.
+    expect(started.length).toBeLessThan(9);
+    expect(parsed.some((entry) => entry.status === "blocked")).toBe(true);
   });
 });
 

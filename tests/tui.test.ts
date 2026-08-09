@@ -269,6 +269,14 @@ describe("lightweight pi-tui areas", () => {
     expect(submitted).toEqual(["ship it"]);
     expect(textOf(app.transcript.render(80))).toContain("> ship it");
 
+    // setRunning flips the header/footer immediately, before any model event.
+    app.setRunning(true);
+    expect(textOf(app.header.render(80))).toContain("working");
+    expect(textOf(app.footer.render(80))).toContain("working");
+    app.setRunning(false);
+    expect(textOf(app.header.render(80))).toContain("idle");
+    expect(textOf(app.footer.render(80))).not.toContain("working");
+
     app.handleManagerEvent({ type: "model_event", event: { type: "text_start" } });
     app.handleManagerEvent({ type: "model_event", event: { type: "text_delta", delta: "done" } });
     app.handleManagerEvent({ type: "model_event", event: { type: "text_end", content: "done" } });
@@ -802,5 +810,16 @@ describe("lightweight pi-tui areas", () => {
     footer.editor.handleInput("\t");
     for (let i = 0; i < 10; i += 1) await Promise.resolve();
     expect(footer.editor.getText()).toBe("/session manager-bbb");
+  });
+
+  test("app clearInput empties the footer editor draft", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    app.footer.editor.setText("draft text");
+    app.clearInput();
+    expect(app.footer.editor.getText()).toBe("");
   });
 });
