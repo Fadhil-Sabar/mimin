@@ -1,4 +1,4 @@
-import type { AgentConfig, RoleConfig } from "../config.js";
+import type { AgentConfig, MemoryConfig, RoleConfig } from "../config.js";
 
 /**
  * Mutable role configuration for one interactive session.
@@ -11,11 +11,13 @@ import type { AgentConfig, RoleConfig } from "../config.js";
  */
 export class AgentRuntime {
   readonly dataDir: string;
+  readonly memory: MemoryConfig;
   manager: RoleConfig;
   sidekick: RoleConfig;
 
   constructor(config: AgentConfig) {
     this.dataDir = config.dataDir;
+    this.memory = { ...config.memory };
     this.manager = { ...config.manager };
     this.sidekick = { ...config.sidekick };
   }
@@ -26,6 +28,7 @@ export class AgentRuntime {
       dataDir: this.dataDir,
       manager: { ...this.manager },
       sidekick: { ...this.sidekick },
+      memory: this.memory,
     };
   }
 }

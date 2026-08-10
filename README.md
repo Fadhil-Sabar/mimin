@@ -63,6 +63,16 @@ Nested role objects merge, so a project can override only its manager model or t
 
 The current working directory is always the workspace and determines project-memory identity.
 
+An optional `memory` section controls automatic long-term memory learning:
+
+```json
+{
+  "memory": { "auto": false }
+}
+```
+
+It defaults to `true` (see [Automatic memory](#automatic-memory-v020) under `/memory`).
+
 ## Usage
 
 ```sh
@@ -87,6 +97,8 @@ Slash commands are intercepted in interactive mode before any model call. Typing
 /model manager <model-id>
 /model sidekick <model-id>
 
+/provider
+
 /session
 /session <session-id>
 
@@ -105,6 +117,17 @@ Switches the manager or sidekick model during an interactive session without res
 
 The switch applies to subsequent turns in this session only; it does **not** persist to `~/.mimin/config.json` or the project config.
 
+#### `/provider`
+
+Lists every known provider with a credential hint and whether credentials appear configured.
+
+- The provider list comes from pi-ai's registry plus mimin's custom `commandcode` provider.
+- Each entry shows the environment variable (or native auth source) the provider needs, e.g. `openai — requires OPENAI_API_KEY`.
+- Filtering is case-insensitive and matches anywhere in the id, consistent with `/model`.
+- Credential detection only checks whether the expected source appears available — it never reads or displays credential values.
+
+`/provider` is informational only: it never switches a role's provider or model, and it cannot configure secrets. Providers and models are configured in `config.json`; use `/model <role>` to switch a role's model for the current session. Set the listed environment variable and restart mimin to enable a provider.
+
 #### `/session`
 
 Selects and restores an existing manager session.
@@ -114,7 +137,30 @@ Selects and restores an existing manager session.
 
 #### `/memory`
 
-Explicit memory is never learned or injected automatically. Writes always pass through credential-like secret filtering, and the UI reports whether redaction occurred. The manager can retrieve compact ranked memory snippets on demand with its `memory_search` tool, and bounded historical snippets with `session_search`; neither tool returns full records or transcripts.
+Memory is written explicitly with `/memory` and, since v0.2.0, learned automatically from conversation. All writes always pass through credential-like secret filtering, and the UI reports whether redaction occurred. The manager can retrieve compact ranked memory snippets on demand with its `memory_search` tool, and bounded historical snippets with `session_search`; neither tool returns full records or transcripts.
+
+##### Automatic memory (v0.2.0)
+
+After each completed manager turn, mimin runs a lightweight, post-turn memory review. It uses the manager's currently configured provider/model to extract durable, high-confidence facts from the **latest user-authored turns only**:
+
+- **What is learned**: preferences ("I prefer Bun instead of npm"), corrections ("No, I use Fedora now, not Arch"), project conventions ("For this project always use pnpm"), and stable context ("My production branch is master").
+- **User vs project**: each candidate is classified into user memory (general preferences) or project memory (workspace-specific). Classification is conservative — uncertain candidates are not written.
+- **Correction behavior**: a correction that matches an existing memory **supersedes** it. The old record is tombstoned so both never surface as equally valid current facts; the new record carries a reference to what it replaced.
+- **Deduplication**: before writing, mimin searches existing memory and skips exact or near duplicates.
+- **Secret filtering**: every automatic write passes through the same credential filter as `/memory add` — API keys, passwords, tokens, Authorization headers, and credential-like strings never persist, even if the learner suggests them.
+- **What is intentionally excluded**: tool output, file/README contents, website content, issue text, dependency docs, and external model output are never automatically persisted. The learner has no workspace access, no tools, and no memory-write ability — it only transforms bounded user text into structured candidates, and application code decides what gets stored.
+
+The review is bounded (only the latest user turn plus compact related-memory matches), runs **after** the response completes (never blocking streaming), and only once per turn. A subtle `Memory learned · N new facts` line appears in the transcript when something is stored — never the candidate text itself.
+
+Automatic learning can be disabled in config:
+
+```json
+{
+  "memory": { "auto": false }
+}
+```
+
+It defaults to `true` (safe because learning is limited to user-authored content, filtered, deduplicated, and conservative). Manual `/memory add` and `/memory search` work exactly as before regardless of this setting.
 
 ## Architecture and permissions
 

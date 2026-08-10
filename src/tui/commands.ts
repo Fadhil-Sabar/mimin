@@ -1,6 +1,7 @@
 import type { AutocompleteItem, SlashCommand } from "@mariozechner/pi-tui";
 import { suggestModels } from "./model-suggestions.js";
 import type { ModelSuggestionSource } from "./model-suggestions.js";
+import { suggestProviders } from "./provider-suggestions.js";
 
 /**
  * The interactive slash-command family, shared between the CLI interceptor
@@ -12,16 +13,17 @@ import type { ModelSuggestionSource } from "./model-suggestions.js";
 export const INTERACTIVE_COMMAND_NAMES = [
   "/session [<session-id>]",
   "/model [manager|sidekick] [<model-id>]",
+  "/provider",
   "/memory add user <text>",
   "/memory add project <text>",
   "/memory search <query>",
   "/help",
 ] as const;
 
-/** Options accepted by the /model command's second position. */
-const MODEL_ROLE_OPTIONS: AutocompleteItem[] = [
-  { value: "manager ", label: "manager", description: "Switch the manager model" },
-  { value: "sidekick ", label: "sidekick", description: "Switch the sidekick model" },
+/** Options accepted by the /model and /provider commands' second position. */
+const ROLE_OPTIONS: AutocompleteItem[] = [
+  { value: "manager ", label: "manager", description: "Switch the manager role" },
+  { value: "sidekick ", label: "sidekick", description: "Switch the sidekick role" },
 ];
 
 /** Fetch the model dropdown for a role's current provider. */
@@ -47,10 +49,40 @@ function modelIdCompletions(
 /** Resolve a role's current provider for the /model dropdown. */
 export type RoleProviderResolver = (role: "manager" | "sidekick") => string;
 
+/** Provider suggestions for the /provider dropdown. */
+export type ProviderSuggestionSource = () => Promise<
+  { id: string; label?: string; description?: string; configured?: boolean }[]
+>;
+
 /** Session suggestions for the /session dropdown (manager or sidekick). */
 export type SessionSuggestionSource = (role: "manager" | "sidekick") => Promise<
   { id: string; label?: string; description?: string }[]
 >;
+
+/** Fetch the provider dropdown for the /provider command. */
+function providerIdCompletions(
+  suggest: ProviderSuggestionSource,
+): (prefix: string) => Promise<AutocompleteItem[] | null> {
+  return async (argumentPrefix: string): Promise<AutocompleteItem[] | null> => {
+    const prefix = argumentPrefix.trim();
+    const suggestions = await suggest();
+    const items = suggestions.map((item) => {
+      const description = [
+        ...(item.description ? [item.description] : []),
+        ...(item.configured ? ["configured"] : []),
+      ].join(" · ");
+      return {
+        value: item.id,
+        label: item.id,
+        ...(description ? { description } : {}),
+      };
+    });
+    const filtered = prefix.length === 0
+      ? items
+      : items.filter((item) => item.value.toLowerCase().includes(prefix.toLowerCase()));
+    return filtered.length > 0 ? filtered : null;
+  };
+}
 
 /**
  * Slash commands offered by the footer autocomplete. The /model dropdown is
@@ -61,7 +93,9 @@ export function createSlashCommands(
   suggest: ModelSuggestionSource,
   providerOf: RoleProviderResolver,
   sessionSource?: SessionSuggestionSource,
+  suggestProvidersSource?: ProviderSuggestionSource,
 ): SlashCommand[] {
+  const providers = suggestProvidersSource ?? (async () => []);
   return [
     {
       name: "/help",
@@ -111,8 +145,18 @@ export function createSlashCommands(
           return modelIdCompletions(provider, suggest)(modelPrefix);
         }
         // Role pick: manager | sidekick.
-        const filtered = MODEL_ROLE_OPTIONS.filter((option) => option.value.startsWith(prefix));
+        const filtered = ROLE_OPTIONS.filter((option) => option.value.startsWith(prefix));
         return filtered.length > 0 ? filtered : null;
+      },
+    },
+    {
+      name: "/provider",
+      description: "List providers with credential hints",
+      getArgumentCompletions(
+        argumentPrefix: string,
+      ): AutocompleteItem[] | Promise<AutocompleteItem[] | null> | null {
+        const prefix = argumentPrefix.trim();
+        return providerIdCompletions(providers)(prefix);
       },
     },
     {
@@ -137,4 +181,6 @@ export function createSlashCommands(
 export const SLASH_COMMANDS: SlashCommand[] = createSlashCommands(
   suggestModels,
   () => "commandcode",
+  undefined,
+  suggestProviders,
 );

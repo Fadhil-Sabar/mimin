@@ -7,6 +7,7 @@ function config(dataDir = "/data/root"): AgentConfig {
     dataDir,
     manager: { provider: "fake", model: "manager", thinking: "off" },
     sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
+    memory: { auto: true },
   };
 }
 

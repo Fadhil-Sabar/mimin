@@ -1062,6 +1062,79 @@ describe("lightweight pi-tui areas", () => {
     expect(menu).not.toContain("deepseek");
   });
 
+  test("/provider dropdown lists provider IDs with hints and arrow+Tab applies", async () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      roleProviders: () => "commandcode",
+      suggestProviders: async () => [
+        { id: "anthropic", configured: true, description: "requires ANTHROPIC_API_KEY" },
+        { id: "openai", description: "requires OPENAI_API_KEY" },
+        { id: "openrouter" },
+        { id: "commandcode", configured: true },
+      ],
+    });
+    footer.editor.setText("");
+    // No role pick: /provider alone opens the provider dropdown.
+    for (const ch of "/provider ") {
+      footer.editor.handleInput(ch);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    }
+    expect(footer.editor.isShowingAutocomplete()).toBe(true);
+    const menu = textOf(footer.editor.render(80));
+    expect(menu).toContain("anthropic");
+    expect(menu).toContain("commandcode");
+    expect(menu).toContain("requires ANTHROPIC_API_KEY");
+    expect(menu).toContain("configured");
+    // Arrow down selects the second provider; Tab applies it.
+    footer.editor.handleInput("\u001b[B");
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    footer.editor.handleInput("\t");
+    for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    expect(footer.editor.getText()).toBe("/provider openai");
+  });
+
+  test("/provider dropdown filters by any-position case-insensitive substring", async () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      roleProviders: () => "commandcode",
+      suggestProviders: async () => [
+        { id: "anthropic" },
+        { id: "openai" },
+        { id: "openrouter" },
+        { id: "google-vertex" },
+      ],
+    });
+    footer.editor.setText("");
+    // "ROUT" should match "openrouter" case-insensitively (any position).
+    for (const ch of "/provider ROUT") {
+      footer.editor.handleInput(ch);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    }
+    expect(footer.editor.isShowingAutocomplete()).toBe(true);
+    const menu = textOf(footer.editor.render(80));
+    expect(menu).toContain("openrouter");
+    expect(menu).not.toContain("openai");
+    expect(menu).not.toContain("anthropic");
+  });
+
+  test("/provider command appears in the autocomplete command list", async () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      suggestProviders: async () => [{ id: "anthropic" }],
+    });
+    footer.editor.setText("");
+    for (const ch of "/prov") {
+      footer.editor.handleInput(ch);
+      for (let i = 0; i < 10; i += 1) await Promise.resolve();
+    }
+    expect(footer.editor.isShowingAutocomplete()).toBe(true);
+    const menu = textOf(footer.editor.render(80));
+    expect(menu).toContain("/provider");
+  });
+
   test("/session dropdown lists sessions and arrow+Tab applies the id", async () => {
     const footer = new Footer({
       managerModel: "gpt-5.5",

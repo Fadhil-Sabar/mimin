@@ -7,6 +7,8 @@ import type { AgentEvent } from "./agent/types.js";
 import type { AgentConfig } from "./config.js";
 import { ConfigValidationError, loadConfig } from "./config.js";
 import { MemoryStore } from "./memory/store.js";
+import { autoMemoryEnabled, learnFromTurn } from "./memory/auto.js";
+import { MemoryLearner } from "./memory/learner.js";
 import type { MemorySearchResult } from "./memory/search.js";
 import { SessionStore } from "./session/session.js";
 import { AgentTui } from "./tui/app.js";
@@ -18,8 +20,10 @@ import type { ModelSuggestionSource } from "./tui/model-suggestions.js";
 import { suggestModels } from "./tui/model-suggestions.js";
 import type { LocalDelegateEvent } from "./tui/sidekick.js";
 import { sanitizeText } from "./tui/header.js";
+import { suggestProviders } from "./tui/provider-suggestions.js";
+import type { ProviderSuggestionSource } from "./tui/provider-suggestions.js";
 
-export const CLI_VERSION = "0.1.0";
+export const CLI_VERSION = "0.2.0";
 
 export type ParsedCliArguments =
   | { mode: "help" }
@@ -67,6 +71,8 @@ export interface CliDependencies {
   createTui?: (options: AgentTuiOptions) => CliTui;
   /** Injectable model suggestions for /model (defaults to pi-ai + Command Code). */
   suggestModels?: ModelSuggestionSource;
+  /** Injectable provider suggestions for /provider (defaults to pi-ai + Command Code). */
+  suggestProviders?: ProviderSuggestionSource;
 }
 
 export interface InteractiveCommandOptions {
@@ -79,6 +85,8 @@ export interface InteractiveCommandOptions {
   refreshTui?(): void;
   /** Injectable model suggestions for /model; defaults to pi-ai + Command Code. */
   suggestModels?: ModelSuggestionSource;
+  /** Injectable provider suggestions for /provider; defaults to pi-ai + Command Code. */
+  suggestProviders?: ProviderSuggestionSource;
   /** Restore a previous manager session: load its history and switch to it. */
   restoreSession?(sessionId: string): Promise<string | undefined>;
 }
@@ -177,6 +185,38 @@ function modelRole(value: string | undefined): ModelRole | undefined {
   return ROLES.find((role) => role === value);
 }
 
+/**
+ * Show every known provider with credential hints and availability, plus the
+ * role providers currently configured (for reference only — /provider never
+ * switches a role, it only informs). An optional query filters the list to
+ * matching provider ids (the dropdown's Tab-apply produces one).
+ */
+async function handleProviderCommand(
+  query: string | undefined,
+  options: InteractiveCommandOptions,
+): Promise<void> {
+  const providerSource = options.suggestProviders ?? suggestProviders;
+  const providers = await providerSource();
+  const filtered = query
+    ? providers.filter((item) => item.id.toLowerCase().includes(query.toLowerCase()))
+    : providers;
+  const rows = filtered.map((item) => {
+    const state = item.configured ? "configured" : "not configured";
+    const hint = item.description ? ` — ${item.description}` : "";
+    return `  ${item.id.padEnd(28)}${state}${hint}`;
+  });
+  options.showInfo([
+    ...(query ? [`Providers matching ${terminalText(query, 100)}:`] : ["Providers:"]),
+    ...(rows.length > 0 ? rows : ["  (no matching providers)"]),
+    "",
+    `Configured in config.json: manager ${roleLabel(options.runtime.manager)} · ` +
+      `sidekick ${roleLabel(options.runtime.sidekick)}`,
+    "Credentials come from the environment (or native provider auth); " +
+      "set the listed env var and restart mimin. /provider never stores or " +
+      "switches credentials — use /model <role> to pick a role's model.",
+  ].join("\n"));
+}
+
 /** Switch the manager or sidekick model at runtime (interactive only). */
 async function handleModelCommand(
   line: string,
@@ -260,6 +300,11 @@ export async function handleInteractiveCommand(
   }
   if (line === "/model" || line.startsWith("/model ")) {
     await handleModelCommand(line, options);
+    return true;
+  }
+  if (line === "/provider" || line.startsWith("/provider ")) {
+    const query = line.slice("/provider".length).trim();
+    await handleProviderCommand(query.length > 0 ? query : undefined, options);
     return true;
   }
   if (line === "/session" || line.startsWith("/session ")) {
@@ -389,6 +434,7 @@ async function runInteractive(
   createTui: (options: AgentTuiOptions) => CliTui,
   io: CliIo,
   suggestModelsSource?: ModelSuggestionSource,
+  suggestProvidersSource?: ProviderSuggestionSource,
 ): Promise<number> {
   let sessionId = shouldContinue ? await newestManagerSession(store) : undefined;
   if (shouldContinue && !sessionId) {
@@ -443,6 +489,7 @@ async function runInteractive(
           });
         },
         suggestModels: suggestModelsSource,
+        suggestProviders: suggestProvidersSource,
         restoreSession: async (id) => {
           try {
             const session = await store.loadSession("manager", id);
@@ -476,6 +523,7 @@ async function runInteractive(
       const controller = new AbortController();
       activeController = controller;
       let receivedManagerText = false;
+      let completed = false;
       try {
         const result = await manager({
           input: line,
@@ -503,7 +551,8 @@ async function runInteractive(
           onDelegateEvent: (event) => app?.handleDelegateEvent(event),
         });
         sessionId = result.sessionId;
-        if (result.status !== "completed") {
+        completed = result.status === "completed";
+        if (!completed) {
           app?.addError(
             `Manager stopped with status ${result.status}${result.error ? `: ${terminalText(result.error, 2_000)}` : ""}.`,
           );
@@ -516,6 +565,31 @@ async function runInteractive(
         if (activeController === controller) activeController = undefined;
         running = false;
         app?.setRunning(false);
+        // Post-turn automatic memory learning. Bounded, non-blocking, and
+        // best-effort: it runs after the interactive response completes and
+        // only from user-authored turn text (never tool output or external
+        // content). One review per completed turn. Any failure (unknown
+        // provider, no credentials, model error) is swallowed — learning must
+        // never break or delay the interactive loop.
+        if (completed && autoMemoryEnabled(runtime.toConfig())) {
+          const role = runtime.manager;
+          let learner: MemoryLearner | undefined;
+          try {
+            learner = new MemoryLearner({ role });
+          } catch {
+            learner = undefined;
+          }
+          if (learner) {
+            void learnFromTurn(learner, memory, workspace, [line], controller.signal).then(
+              (result) => {
+                if (result.learned > 0) {
+                  app?.addInfo(`Memory learned · ${result.learned} new fact${result.learned === 1 ? "" : "s"}`);
+                }
+              },
+              () => undefined,
+            );
+          }
+        }
       }
     },
   });
@@ -577,6 +651,7 @@ export async function runCli(
       dependencies.createTui ?? ((options) => new AgentTui(options)),
       io,
       dependencies.suggestModels,
+      dependencies.suggestProviders,
     );
   } catch (error) {
     io.stderr(`Could not start interactive mode: ${terminalText(error instanceof Error ? error.message : error, 2_000)}\n`);

@@ -15,6 +15,8 @@ export interface MemoryRecord {
   createdAt: number;
   /** Present only for project-scoped records. */
   projectId?: string;
+  /** Id of the memory record this one supersedes (correction handling). */
+  supersedes?: string;
 }
 
 export interface MemoryWriteResult extends MemoryRecord {
@@ -58,6 +60,16 @@ interface StoredRecord {
   content: string;
   createdAt: number;
   projectId?: string;
+  /** Id of the memory record this one supersedes (correction handling). */
+  supersedes?: string;
+}
+
+/** Append-only tombstone written when a memory is superseded. */
+interface StoredTombstone {
+  version: 1;
+  type: "memory-tombstone";
+  id: string;
+  createdAt: number;
 }
 
 const writeQueues = new Map<string, Promise<void>>();
@@ -120,6 +132,7 @@ function parseRecord(value: unknown): MemoryRecord | undefined {
     content: value.content,
     createdAt: value.createdAt,
     ...(typeof value.projectId === "string" ? { projectId: value.projectId } : {}),
+    ...(typeof value.supersedes === "string" ? { supersedes: value.supersedes } : {}),
   };
 }
 
@@ -214,6 +227,53 @@ export class MemoryStore {
     return this.add(content, options);
   }
 
+  /**
+   * Write a new memory that supersedes an existing one (correction handling).
+   * The old record is tombstoned via an append-only marker so it no longer
+   * surfaces in `load`/`search`, while the new record carries the
+   * `supersedes` id for auditability. Append safety is preserved: nothing is
+   * rewritten in place.
+   */
+  async supersede(
+    input: AddMemoryInput,
+    supersededId: string,
+  ): Promise<MemoryWriteResult> {
+    const scope = input.scope ?? "user";
+    const projectId = scope === "project" ? await this.resolveProjectId(input) : undefined;
+    if (typeof input.content !== "string" || input.content.trim().length === 0) {
+      throw new Error("Memory content must be a non-empty string");
+    }
+    const filtered = filterSecrets(input.content);
+    const record: StoredRecord = {
+      version: 1,
+      type: "memory",
+      id: this.idFactory().replace(/[^A-Za-z0-9._-]/g, "-") || randomUUID(),
+      scope,
+      content: filtered.content,
+      createdAt: this.now(),
+      ...(projectId ? { projectId } : {}),
+      supersedes: supersededId,
+    };
+    await appendSerialized(this.path(scope, projectId), `${JSON.stringify(record)}\n`);
+    const tombstone: StoredTombstone = {
+      version: 1,
+      type: "memory-tombstone",
+      id: supersededId,
+      createdAt: this.now(),
+    };
+    await appendSerialized(this.path(scope, projectId), `${JSON.stringify(tombstone)}\n`);
+    return {
+      id: record.id,
+      scope: record.scope,
+      content: record.content,
+      createdAt: record.createdAt,
+      ...(projectId ? { projectId } : {}),
+      supersedes: supersededId,
+      filtered: filtered.filtered,
+      redactionCount: filtered.redactionCount,
+    };
+  }
+
   async load(scope: MemoryScope, options?: Omit<LoadMemoryOptions, "scope">): Promise<MemoryRecord[]>;
   async load(options: LoadMemoryOptions): Promise<MemoryRecord[]>;
   async load(
@@ -235,11 +295,34 @@ export class MemoryStore {
       throw error;
     }
     const records: MemoryRecord[] = [];
+    const tombstoned = new Set<string>();
+    // First pass: collect tombstones (a superseded record's id is marked).
+    for (const line of text.split("\n")) {
+      if (line.trim().length === 0) continue;
+      try {
+        const parsed = JSON.parse(line) as unknown;
+        if (
+          isRecord(parsed) &&
+          parsed.version === 1 &&
+          parsed.type === "memory-tombstone" &&
+          typeof parsed.id === "string"
+        ) {
+          tombstoned.add(parsed.id);
+        }
+      } catch {
+        // A torn final append must not hide earlier memory.
+      }
+    }
     for (const line of text.split("\n")) {
       if (line.trim().length === 0) continue;
       try {
         const record = parseRecord(JSON.parse(line) as unknown);
-        if (record && record.scope === request.scope && record.projectId === projectId) {
+        if (
+          record &&
+          record.scope === request.scope &&
+          record.projectId === projectId &&
+          !tombstoned.has(record.id)
+        ) {
           records.push(record);
         }
       } catch {

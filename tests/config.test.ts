@@ -147,4 +147,35 @@ describe("layered config", () => {
       loadConfig({ cwd: project, homeDir: home, env: {} }),
     ).rejects.toBeInstanceOf(ConfigValidationError);
   });
+
+  test("memory.auto defaults to true and merges across layers", async () => {
+    const { root, home, project } = await fixture();
+    await writeJson(join(home, ".mimin", "config.json"), {
+      ...roles,
+      memory: { auto: false },
+    });
+
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(config.memory).toEqual({ auto: false });
+
+    // Project layer can re-enable it.
+    await writeJson(join(project, ".mimin", "config.json"), {
+      memory: { auto: true },
+    });
+    const reenabled = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(reenabled.memory).toEqual({ auto: true });
+    expect(reenabled.manager.provider).toBe("manager-provider");
+  });
+
+  test("memory.auto rejects non-boolean values", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), {
+      ...roles,
+      memory: { auto: "yes" },
+    });
+
+    await expect(
+      loadConfig({ cwd: project, homeDir: home, env: {} }),
+    ).rejects.toBeInstanceOf(ConfigValidationError);
+  });
 });

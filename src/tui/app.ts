@@ -7,6 +7,7 @@ import {
   type Terminal,
 } from "@mariozechner/pi-tui";
 import type { RoleProviderResolver, SessionSuggestionSource } from "./commands.js";
+import type { ProviderSuggestionSource } from "./commands.js";
 import { Footer, type ContextSummary } from "./footer.js";
 import { Header, type HeaderRunState } from "./header.js";
 import {
@@ -46,6 +47,8 @@ export interface AgentTuiOptions {
   context?: ContextSummary;
   /** Live role→provider resolution for the /model dropdown. */
   roleProviders?: RoleProviderResolver;
+  /** Provider suggestions for the /provider dropdown. */
+  suggestProviders?: ProviderSuggestionSource;
   /** Session suggestions for the /session dropdown. */
   sessionSource?: SessionSuggestionSource;
   onSubmit?: (line: string) => void | Promise<void>;
@@ -119,6 +122,7 @@ export class AgentTui {
       context: options.context,
       workspace: options.workspace,
       roleProviders: options.roleProviders,
+      suggestProviders: options.suggestProviders,
       sessionSource: options.sessionSource,
       managerWorking: false,
       onSubmit: async (line) => {

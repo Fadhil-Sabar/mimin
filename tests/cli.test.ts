@@ -34,6 +34,7 @@ async function fixture(): Promise<{ workspace: string; config: AgentConfig }> {
       dataDir: join(workspace, "data"),
       manager: { provider: "fake", model: "manager", thinking: "off" },
       sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
+      memory: { auto: true },
     },
   };
 }
@@ -311,8 +312,95 @@ describe("interactive integration", () => {
     expect(errors).toEqual([]);
   });
 
-  test("/model switches the manager and sidekick model at runtime", async () => {
+  test("/provider shows credential hints and never renders credential values", async () => {
     const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      suggestProviders: async () => [
+        { id: "anthropic", configured: true, description: "requires ANTHROPIC_API_KEY" },
+        { id: "openai", configured: false, description: "requires OPENAI_API_KEY" },
+        { id: "commandcode", configured: false, description: "requires COMMANDCODE_API_KEY" },
+      ],
+    };
+
+    // /provider lists every provider with its credential hint and state.
+    expect(await handleInteractiveCommand("/provider", options)).toBe(true);
+    const output = info.at(-1) ?? "";
+    expect(output).toContain("anthropic");
+    expect(output).toContain("openai");
+    expect(output).toContain("commandcode");
+    expect(output).toContain("requires ANTHROPIC_API_KEY");
+    expect(output).toContain("requires OPENAI_API_KEY");
+    expect(output).toContain("requires COMMANDCODE_API_KEY");
+    expect(output).toContain("configured");
+    expect(output).toContain("not configured");
+    // Credential values never leak; the key name is fine.
+    expect(output).not.toContain("sk-");
+    expect(output).not.toContain("token");
+    // The command is informational: runtime and config are untouched.
+    expect(runtime.manager.provider).toBe("fake");
+    expect(runtime.sidekick.provider).toBe("fake");
+    expect(errors).toEqual([]);
+  });
+
+  test("/provider shows the configured roles for reference", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      suggestProviders: async () => [{ id: "openrouter", configured: true }],
+    };
+
+    expect(await handleInteractiveCommand("/provider", options)).toBe(true);
+    expect(info.at(-1)).toContain("manager fake/manager · sidekick fake/sidekick");
+    expect(errors).toEqual([]);
+  });
+
+  test("/provider never switches roles and ignores arguments", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      suggestProviders: async () => [{ id: "openrouter" }],
+    };
+
+    // Typing a provider id is not a switch: it filters the info view.
+    expect(await handleInteractiveCommand("/provider openrouter", options)).toBe(true);
+    expect(runtime.manager.provider).toBe("fake");
+    expect(runtime.sidekick.provider).toBe("fake");
+    expect(info.at(-1)).toContain("Providers matching openrouter");
+    expect(info.at(-1)).toContain("openrouter");
+    expect(errors).toEqual([]);
+
+    // Role-like arguments are just part of the query filter, never a switch.
+    expect(await handleInteractiveCommand("/provider manager openai", options)).toBe(true);
+    expect(runtime.manager.provider).toBe("fake");
+    expect(runtime.sidekick.provider).toBe("fake");
+    expect(info.at(-1)).toContain("Providers matching manager openai");
+    expect(info.at(-1)).toContain("(no matching providers)");
+    expect(errors).toEqual([]);
+  });
+
+  test("/model switches the manager and sidekick model at runtime", async () => {    const { workspace, config } = await fixture();
     const runtime = new AgentRuntime(config);
     const info: string[] = [];
     const errors: string[] = [];

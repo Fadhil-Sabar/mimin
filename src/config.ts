@@ -12,10 +12,16 @@ export interface RoleConfig {
   thinking: ThinkingSetting;
 }
 
+export interface MemoryConfig {
+  /** Automatically learn durable user/project facts from conversations. */
+  auto: boolean;
+}
+
 export interface AgentConfig {
   dataDir: string;
   manager: RoleConfig;
   sidekick: RoleConfig;
+  memory: MemoryConfig;
 }
 
 export interface LoadConfigOptions {
@@ -161,8 +167,17 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     thinking: sidekick ? thinkingValue(sidekick, "sidekick", issues) : "medium",
   };
 
+  const memoryRaw = isObject(raw.memory) ? raw.memory : {};
+  const auto = memoryRaw.auto;
+  if (auto !== undefined && typeof auto !== "boolean") {
+    issues.push("memory.auto must be a boolean");
+  }
+  const memoryConfig: MemoryConfig = {
+    auto: typeof auto === "boolean" ? auto : true,
+  };
+
   if (issues.length > 0) throw new ConfigValidationError(issues);
-  return { dataDir, manager: managerConfig, sidekick: sidekickConfig };
+  return { dataDir, manager: managerConfig, sidekick: sidekickConfig, memory: memoryConfig };
 }
 
 async function readConfigFile(pathname: string): Promise<RawObject> {
@@ -189,6 +204,7 @@ export function defaultConfig(options: LoadConfigOptions = {}): AgentConfig {
     dataDir,
     manager: { provider: "", model: "", thinking: "medium" },
     sidekick: { provider: "", model: "", thinking: "medium" },
+    memory: { auto: true },
   };
 }
 
@@ -216,6 +232,7 @@ export async function loadConfig(
         dataDir: defaults.dataDir,
         manager: defaults.manager,
         sidekick: defaults.sidekick,
+        memory: defaults.memory,
       },
       globalLayer,
     ),

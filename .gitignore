@@ -27,3 +27,6 @@ logs/
 .idea/
 .vscode/
 .DS_Store
+
+# provider runtime state (Command Code local config)
+.commandcode/

@@ -59,6 +59,7 @@ const config = (dataDir: string): AgentConfig => ({
   dataDir,
   manager: { provider: "fake-provider", model: "manager", thinking: "off" },
   sidekick: { provider: "fake-provider", model: "sidekick", thinking: "off" },
+  memory: { auto: true },
 });
 
 function assistant(
@@ -409,6 +410,7 @@ describe("commandcode env credential forwarding", () => {
           dataDir,
           manager: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
           sidekick: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "low" },
+          memory: { auto: true },
         },
         modelResolver: () => ({
           id: "gpt-5.5",
@@ -456,6 +458,7 @@ describe("commandcode env credential forwarding", () => {
           dataDir,
           manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
           sidekick: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "low" },
+          memory: { auto: true },
         },
         modelResolver: () => ({
           id: "claude-sonnet-4-6",

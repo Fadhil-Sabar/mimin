@@ -14,6 +14,7 @@ import {
 import { sanitizeText } from "./header.js";
 import { createSlashCommands, type RoleProviderResolver } from "./commands.js";
 import type { SessionSuggestionSource } from "./commands.js";
+import type { ProviderSuggestionSource } from "./commands.js";
 import { suggestModels } from "./model-suggestions.js";
 import type { ModelSuggestionSource } from "./model-suggestions.js";
 import { cyan, dim, green, yellow } from "./theme.js";
@@ -39,6 +40,8 @@ export interface FooterOptions {
   roleProviders?: RoleProviderResolver;
   /** Model suggestions for the /model dropdown; defaults to pi-ai + Command Code. */
   suggestModels?: ModelSuggestionSource;
+  /** Provider suggestions for the /provider dropdown; defaults to pi-ai + Command Code. */
+  suggestProviders?: ProviderSuggestionSource;
   /** Session suggestions for the /session dropdown. */
   sessionSource?: SessionSuggestionSource;
   onSubmit?: (line: string) => void | Promise<void>;
@@ -228,9 +231,10 @@ export class Footer implements Component, Focusable {
     );
     const suggest = options.suggestModels ?? suggestModels;
     const providerOf = options.roleProviders ?? (() => "commandcode");
+    const providerSuggest = options.suggestProviders;
     this.editor.setAutocompleteProvider(
       slashAwareProvider(
-        createSlashCommands(suggest, providerOf, options.sessionSource) as never,
+        createSlashCommands(suggest, providerOf, options.sessionSource, providerSuggest) as never,
         sanitizeText(options.workspace ?? "", false) || ".",
       ),
     );

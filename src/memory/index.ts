@@ -31,6 +31,24 @@ export {
 export type { SecretFilterResult } from "./secrets.js";
 
 export {
+  MemoryLearner,
+  parseLearnerCandidates,
+} from "./learner.js";
+export type {
+  LearnedMemoryResult,
+  MemoryCandidate,
+  MemoryCandidateReason,
+  MemoryCandidateScope,
+  MemoryLearnerOptions,
+} from "./learner.js";
+
+export {
+  autoMemoryEnabled,
+  learnFromTurn,
+} from "./auto.js";
+export type { AutoMemoryResult } from "./auto.js";
+
+export {
   searchSessions,
   SessionSearch,
   SessionSearcher,
