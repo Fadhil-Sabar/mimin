@@ -28,6 +28,8 @@ export interface TuiHost {
   start(): void;
   stop(): void;
   requestRender(force?: boolean): void;
+  /** Terminal dimensions; the transcript is bounded to the visible rows. */
+  terminal?: { rows: number };
 }
 
 /** Broad structural stream event accepted without importing agent or pi-ai types. */
@@ -105,6 +107,7 @@ export class AgentTui {
   private runState: HeaderRunState = "idle";
   private started = false;
   private tickTimer?: Timer;
+  private lastTranscriptMaxLines = 0;
   private exitArmed = false;
   private exitArmedAt = 0;
   private readonly onExit?: () => void | Promise<void>;
@@ -218,12 +221,32 @@ export class AgentTui {
 
   /** Deterministic component render for tests; it does not start a terminal. */
   render(width: number): string[] {
+    this.syncTranscriptHeight(width);
     return [
       ...this.header.render(width),
       ...this.transcript.render(width),
       ...this.sidekicks.render(width),
       ...this.footer.render(width),
     ];
+  }
+
+  /**
+   * Bound the transcript to the visible viewport so its rendered line count
+   * never grows during streaming (pi-tui's differential renderer would
+   * otherwise scroll the terminal to the tail, yanking the user's scroll
+   * position). Header/footer reservations are fixed; sidekick cards occupy
+   * their current rendered height.
+   */
+  private syncTranscriptHeight(width: number): void {
+    const rows = this.tui.terminal?.rows;
+    if (!rows || rows <= 0) return;
+    const reserved = 1 /* header */ + 5 /* footer rule+status+editor */;
+    const sidekickRows = this.sidekicks.render(width).length;
+    const available = Math.max(4, rows - reserved - sidekickRows);
+    if (available !== this.lastTranscriptMaxLines) {
+      this.lastTranscriptMaxLines = available;
+      this.transcript.setMaxLines(available);
+    }
   }
 
   addTranscript(role: TranscriptRole, text: string): string {

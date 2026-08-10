@@ -716,6 +716,50 @@ describe("lightweight pi-tui areas", () => {
     expect(textOf(footer.render(80))).toContain("sidekick: idle");
   });
 
+  test("transcript is bounded to the viewport so streaming does not yank the scroll position", () => {
+    const host = new FakeTui();
+    // Expose a terminal height so the app caps the transcript to the viewport.
+    (host as FakeTui & { terminal?: { rows: number } }).terminal = { rows: 24 };
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: host,
+    });
+    // Fill beyond the viewport, then scroll up.
+    for (let i = 0; i < 40; i += 1) app.addInfo(`info ${i}`);
+    app.transcript.scrollUp(12);
+    const before = app.render(80);
+    // Stream a long manager response (grows the body).
+    const sid = app.startManagerStream("Answer:");
+    app.appendManagerDelta("Long answer that wraps across many lines. ".repeat(200));
+    app.appendManagerDelta("Even more streaming content. ".repeat(200));
+    const after = app.render(80);
+    // The rendered height must be stable so pi-tui never sees growth and
+    // scrolls the terminal to the tail.
+    expect(after.length).toBe(before.length);
+    // And the scrolled-up position holds: the same content stays at the top.
+    expect(after[2]).toBe(before[2]);
+    // The new streamed content is NOT visible (viewport is pinned up).
+    expect(after.join("\n")).not.toContain("Answer:");
+  });
+
+  test("End restores autoscroll so new content is visible again", () => {
+    const host = new FakeTui();
+    (host as FakeTui & { terminal?: { rows: number } }).terminal = { rows: 24 };
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: host,
+    });
+    for (let i = 0; i < 40; i += 1) app.addInfo(`info ${i}`);
+    app.transcript.scrollUp(12);
+    app.transcript.scrollToBottom();
+    app.addInfo("fresh tail");
+    const view = app.render(80);
+    // Tail-anchored again: the newest content is visible.
+    expect(view.join("\n")).toContain("fresh tail");
+  });
+
   test("header run state and turn chip; footer spinner while working", () => {
     const header = new Header({
       managerModel: "gpt-5.5",

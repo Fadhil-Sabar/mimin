@@ -145,6 +145,11 @@ export class Transcript extends Container implements Component {
     this.tailAnchored = true;
   }
 
+  /** Whether the viewport is pinned to the tail (autoscroll active). */
+  isTailAnchored(): boolean {
+    return this.tailAnchored;
+  }
+
   /** Rows the viewport must reserve beyond the visible transcript window. */
   statusRows(): number {
     return STATUS_ROWS;
