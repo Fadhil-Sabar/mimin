@@ -8,7 +8,7 @@ import {
 import { sanitizeText } from "./header.js";
 import { cyan, dim, green, yellow } from "./theme.js";
 
-export type TranscriptRole = "user" | "manager" | "info" | "error";
+export type TranscriptRole = "user" | "manager" | "info" | "error" | "tool";
 
 export interface TranscriptEntry {
   readonly id: string;
@@ -39,6 +39,8 @@ interface MutableEntry {
   trailingBlank: boolean;
   /** Absolute index of the entry's first rendered row in the full transcript. */
   startRow: number;
+  /** Live line renderer for tool entries; the component mutates in place. */
+  lineRenderer?: (width: number) => string[];
 }
 
 const HEADINGS: Record<TranscriptRole, string> = {
@@ -46,6 +48,7 @@ const HEADINGS: Record<TranscriptRole, string> = {
   manager: "Manager",
   info: "Info",
   error: "Error",
+  tool: "Tools",
 };
 
 /** One-line emphasis for headings: cyan with a bold accent token. */
@@ -188,6 +191,32 @@ export class Transcript extends Container implements Component {
     return id;
   }
 
+  /**
+   * Append a tool-activity block (one per turn) rendered live by the given
+   * renderer. The block updates in place as tool rows change; it never
+   * re-appends a finished row.
+   */
+  appendToolBlock(renderer: (width: number) => string[]): string {
+    const id = `transcript-${++this.sequence}`;
+    const group = new Container();
+    const entry: MutableEntry = {
+      id,
+      role: "tool",
+      text: "",
+      streaming: false,
+      component: group,
+      rows: [],
+      trailingBlank: true,
+      startRow: 0,
+      lineRenderer: renderer,
+    };
+    this.records.push(entry);
+    this.byId.set(id, entry);
+    this.addChild(group);
+    this.discardOldest();
+    return id;
+  }
+
   /** Replace a stream with the provider's current cumulative text. */
   updateStream(id: string, value: string): boolean {
     const entry = this.byId.get(id);
@@ -289,6 +318,10 @@ export class Transcript extends Container implements Component {
 
   /** Join a single entry's component lines with a blank separator row. */
   private renderEntry(entry: MutableEntry, width: number): string[] {
+    if (entry.lineRenderer) {
+      const body = entry.lineRenderer(width);
+      return entry.trailingBlank && body.length > 0 ? [...body, ""] : body;
+    }
     const body: string[] = [];
     for (const child of entry.component.children) {
       body.push(...child.render(width));

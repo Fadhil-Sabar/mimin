@@ -255,7 +255,6 @@ describe("lightweight pi-tui areas", () => {
     expect(host.children).toEqual([
       app.header,
       app.transcript,
-      app.tools,
       app.sidekicks,
       app.footer,
     ]);
@@ -337,7 +336,7 @@ describe("lightweight pi-tui areas", () => {
       },
     });
 
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     // Title-case aligned labels, path from tool_start args, no debug text.
     expect(rows).toContain("✓ Read    src/app.ts");
     expect(rows).toContain("✕ Edit");
@@ -347,7 +346,7 @@ describe("lightweight pi-tui areas", () => {
     expect(rows).not.toContain("[error]");
     // Raw output never reaches the rows.
     expect(rows).not.toContain("stdout");
-    expectWidth(app.tools.render(12), 12);
+    expectWidth(app.transcript.render(12), 12);
   });
 
   test("tool rows parse path/command from tool_start arguments", () => {
@@ -372,7 +371,7 @@ describe("lightweight pi-tui areas", () => {
         toolCall: { name: "edit", arguments: { path: "src/cli.ts" } },
       },
     });
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     expect(rows).toContain("● Bash    bun test");
     expect(rows).toContain("● Edit    src/cli.ts");
     expect(rows).toContain("…");
@@ -401,7 +400,9 @@ describe("lightweight pi-tui areas", () => {
         result: { isError: false, details: [{ status: "complete" }] },
       },
     });
-    expect(app.tools.render(80)).toEqual([]);
+    expect(app.transcript.render(80)).toEqual([]);
+    // No tool block appears in the transcript either (delegate is a card).
+    expect(textOf(app.transcript.render(80))).not.toContain("Delegate");
   });
 
   test("tool rows show pending/running/completed/failed states", () => {
@@ -415,23 +416,23 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
     });
-    expect(textOf(app.tools.render(80))).toContain("● Read    a.ts");
+    expect(textOf(app.transcript.render(80))).toContain("● Read    a.ts");
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
     });
-    expect(textOf(app.tools.render(80))).toContain("✓ Read    a.ts");
+    expect(textOf(app.transcript.render(80))).toContain("✓ Read    a.ts");
     // Edit: fails.
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "edit", arguments: { path: "b.ts" } } },
     });
-    expect(textOf(app.tools.render(80))).toContain("● Edit    b.ts");
+    expect(textOf(app.transcript.render(80))).toContain("● Edit    b.ts");
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_end", turn: 1, toolCall: { name: "edit" }, result: { isError: true, text: "boom" } },
     });
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     expect(rows).toContain("✕ Edit    b.ts");
     expect(rows).toContain("boom");
   });
@@ -455,7 +456,7 @@ describe("lightweight pi-tui areas", () => {
         result: { isError: true, text: 'Tool "read" failed: Path "src" is not a regular file' },
       },
     });
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     // The name is already in the label column; the prefix is stripped.
     expect(rows).toContain("✕ Read    src");
     expect(rows).not.toContain('Tool "read" failed:');
@@ -484,7 +485,7 @@ describe("lightweight pi-tui areas", () => {
         },
       },
     });
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     expect(rows).toContain("✕ Bash");
     expect(rows).toContain("ENOENT: no such file");
     expect(rows).not.toContain("\u001b[31m");
@@ -509,11 +510,61 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
     });
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     // Exactly one row, now completed; no second "running" copy survives.
     expect(rows.match(/Read/g)).toHaveLength(1);
     expect(rows).toContain("✓ Read    a.ts");
     expect(rows).not.toContain("● Read");
+  });
+
+  test("tool rows group per turn, inline in conversation order", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    // Turn 1: user prompt, read, verify.
+    app.addUser("fix the bug");
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "verification", arguments: { action: "test" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "verification" }, result: { isError: false, details: { action: "test", ok: true, results: [{ command: "bun test", exitCode: 0, ok: true }] } } },
+    });
+    // Turn 2: manager text, then another read.
+    app.handleManagerEvent({ type: "model_event", event: { type: "text_start", turn: 2 } });
+    app.handleManagerEvent({ type: "model_event", event: { type: "text_delta", turn: 2, delta: "done" } });
+    app.handleManagerEvent({ type: "model_event", event: { type: "text_end", turn: 2, content: "done" } });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 2, toolCall: { name: "read", arguments: { path: "b.ts" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 2, toolCall: { name: "read" }, result: { isError: false } },
+    });
+
+    const rows = textOf(app.transcript.render(80));
+    // Both tool blocks appear inline, after their user prompt / manager text.
+    expect(rows).toContain("> fix the bug");
+    expect(rows).toContain("✓ Read    a.ts");
+    expect(rows).toContain("✓ Verify  bun test");
+    expect(rows).toContain("done");
+    expect(rows).toContain("✓ Read    b.ts");
+    // Order preserved: turn 1 tools before turn 2 text and tools.
+    expect(rows.indexOf("✓ Read    a.ts")).toBeLessThan(rows.indexOf("✓ Verify  bun test"));
+    expect(rows.indexOf("✓ Verify  bun test")).toBeLessThan(rows.indexOf("done"));
+    expect(rows.indexOf("done")).toBeLessThan(rows.indexOf("✓ Read    b.ts"));
   });
 
   test("bash rows show only the whitelisted command, never raw output", () => {
@@ -539,7 +590,7 @@ describe("lightweight pi-tui areas", () => {
         },
       },
     });
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     expect(rows).toContain("✓ Bash    bun test");
     expect(rows).not.toContain("13 pass");
     expect(rows).not.toContain("stdout");
@@ -555,7 +606,7 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "verification", arguments: { action: "test" } } },
     });
-    expect(textOf(app.tools.render(80))).toContain("● Verify");
+    expect(textOf(app.transcript.render(80))).toContain("● Verify");
     app.handleManagerEvent({
       type: "model_event",
       event: {
@@ -575,7 +626,7 @@ describe("lightweight pi-tui areas", () => {
         },
       },
     });
-    const rows = textOf(app.tools.render(80));
+    const rows = textOf(app.transcript.render(80));
     expect(rows).toContain("✓ Verify  bun test");
     expect(rows).toContain("passed");
     // No raw output from the details leaks into the row.
@@ -593,10 +644,10 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "bash", arguments: { command: "bun test --coverage --verbose" } } },
     });
-    const wide = app.tools.render(80);
+    const wide = app.transcript.render(80);
     expect(textOf(wide)).toContain("bun test --coverage");
     expectWidth(wide, 80);
-    const narrow = app.tools.render(10);
+    const narrow = app.transcript.render(10);
     expectWidth(narrow, 10);
   });
 

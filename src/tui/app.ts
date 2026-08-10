@@ -90,6 +90,8 @@ export class AgentTui {
   readonly footer: Footer;
 
   private activeManagerStream?: string;
+  /** Transcript entry id for each turn's inline tool block. */
+  private readonly toolBlockByTurn = new Map<number, string>();
   private runState: HeaderRunState = "idle";
   private started = false;
   private tickTimer?: Timer;
@@ -130,10 +132,10 @@ export class AgentTui {
       requestRender: () => this.requestRender(),
     });
 
-    // Five top-level areas: header, transcript, tool rows, sidekick cards, footer.
+    // Four top-level areas: header, transcript, sidekick cards, footer.
+    // Manager tool calls render inline inside the transcript as blocks.
     this.tui.addChild(this.header);
     this.tui.addChild(this.transcript);
-    this.tui.addChild(this.tools);
     this.tui.addChild(this.sidekicks);
     this.tui.addChild(this.footer);
     this.tui.setFocus(this.footer);
@@ -197,7 +199,6 @@ export class AgentTui {
     return [
       ...this.header.render(width),
       ...this.transcript.render(width),
-      ...this.tools.render(width),
       ...this.sidekicks.render(width),
       ...this.footer.render(width),
     ];
@@ -228,6 +229,8 @@ export class AgentTui {
   /** Clear the transcript and replay a restored session's history. */
   restoreSession(entries: { role: "user" | "manager"; text: string }[]): void {
     this.transcript.clearEntries();
+    this.toolBlockByTurn.clear();
+    this.tools.clear();
     for (const entry of entries) {
       if (entry.role === "user") this.addUser(entry.text);
       else this.addManager(entry.text);
@@ -291,7 +294,16 @@ export class AgentTui {
       this.addError(managerError(event.error));
     } else if (type === "tool_start" || type === "tool_end") {
       this.setRunState("working");
-      this.tools.apply(event as unknown as LocalToolEvent);
+      const tracked = this.tools.apply(event as unknown as LocalToolEvent);
+      // Tool rows live inline in the transcript, grouped per turn.
+      const turn = record(event)?.turn;
+      const turnNumber = typeof turn === "number" ? turn : 0;
+      if (tracked && type === "tool_start" && !this.toolBlockByTurn.has(turnNumber)) {
+        const id = this.transcript.appendToolBlock(
+          this.tools.rendererForTurn(turnNumber),
+        );
+        this.toolBlockByTurn.set(turnNumber, id);
+      }
       this.requestRender();
     }
   }

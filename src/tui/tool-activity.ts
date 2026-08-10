@@ -22,6 +22,8 @@ type ToolStatus = "pending" | "running" | "ok" | "failed";
 interface ToolRow {
   name: string;
   status: ToolStatus;
+  /** Turn of the tool call, for grouping rows into transcript blocks. */
+  turn: number;
   /** Safe detail parsed from tool_start arguments (path/command). */
   detail?: string;
   /** Compact error message shown on failure (name stripped, sanitized). */
@@ -132,20 +134,26 @@ function compact(value: unknown, limit: number): string {
  */
 export class ToolActivity implements Component {
   private readonly rows: ToolRow[] = [];
+  /** Turn of the most recent tool_start, for grouping rows into blocks. */
+  private currentTurn = 0;
 
-  apply(event: LocalToolEvent): void {
+  /** Apply a tool event; returns false when the tool is card-represented. */
+  apply(event: LocalToolEvent): boolean {
     const type = typeof event.type === "string" ? event.type : "";
     const toolCall = record(event.toolCall);
     const name = nameOf(toolCall?.name);
-    if (CARD_REPRESENTED.has(name)) return;
+    if (CARD_REPRESENTED.has(name)) return false;
 
     if (type === "tool_start") {
+      const turn = typeof event.turn === "number" ? event.turn : 0;
       this.rows.push({
         name,
         status: "running",
         detail: startDetail(name, toolCall?.arguments),
+        turn,
       });
-      return;
+      this.currentTurn = turn;
+      return true;
     }
 
     if (type === "tool_end") {
@@ -153,7 +161,7 @@ export class ToolActivity implements Component {
         .slice()
         .reverse()
         .find((candidate) => candidate.name === name && candidate.status === "running");
-      if (!row) return;
+      if (!row) return false;
       const result = record(event.result);
       const isError = result?.isError === true;
       row.status = isError ? "failed" : "ok";
@@ -162,11 +170,34 @@ export class ToolActivity implements Component {
       } else if (name === "verification") {
         row.summary = verificationSummary(result?.details);
       }
+      return true;
     }
+    return false;
+  }
+
+  /** True when a tool block exists for the given turn. */
+  hasTurn(turn: number): boolean {
+    return this.rows.some((row) => row.turn === turn);
+  }
+
+  /** Live renderer for one turn's tool rows (in-place updates on apply). */
+  rendererForTurn(turn: number): (width: number) => string[] {
+    return (width: number) => this.renderTurn(width, turn);
+  }
+
+  /** The rows belonging to a turn, as standalone renderable lines. */
+  renderTurn(width: number, turn: number): string[] {
+    const lines: string[] = [];
+    for (const row of this.rows) {
+      if (row.turn !== turn) continue;
+      lines.push(...this.renderRow(row, width));
+    }
+    return lines;
   }
 
   clear(): void {
     this.rows.length = 0;
+    this.currentTurn = 0;
   }
 
   invalidate(): void {
@@ -175,29 +206,32 @@ export class ToolActivity implements Component {
 
   render(width: number): string[] {
     if (width <= 0 || this.rows.length === 0) return [];
-    return this.rows.flatMap((row) => {
-      const label = labelOf(row.name).padEnd(LABEL_WIDTH);
-      const glyph = STATUS_GLYPHS[row.status];
-      const styledGlyph = row.status === "failed"
-        ? yellow(glyph)
-        : row.status === "ok"
-          ? green(glyph)
-          : cyan(glyph);
-      const detail = row.detail ? ` ${dim(row.detail)}` : "";
-      const suffix = row.status === "running" ? ` ${cyan("…")}` : "";
-      const summary = row.status === "ok" && row.summary
-        ? ` ${green(`· ${row.summary}`)}`
-        : "";
-      const line = truncateToWidth(
-        ` ${styledGlyph} ${label}${detail}${suffix}${summary}`,
-        width,
-      );
-      if (row.status !== "failed" || !row.error) return [line];
-      // Failed rows get a quiet second line with the error, keeping the
-      // failure readable without dumping raw tool output into the stream.
-      const errorLine = truncateToWidth(`  ${dim("·")} ${yellow(row.error)}`, width);
-      return [line, errorLine];
-    });
+    return this.rows.flatMap((row) => this.renderRow(row, width));
+  }
+
+  /** One tool row (plus an error sub-line when failed) as rendered lines. */
+  private renderRow(row: ToolRow, width: number): string[] {
+    const label = labelOf(row.name).padEnd(LABEL_WIDTH);
+    const glyph = STATUS_GLYPHS[row.status];
+    const styledGlyph = row.status === "failed"
+      ? yellow(glyph)
+      : row.status === "ok"
+        ? green(glyph)
+        : cyan(glyph);
+    const detail = row.detail ? ` ${dim(row.detail)}` : "";
+    const suffix = row.status === "running" ? ` ${cyan("…")}` : "";
+    const summary = row.status === "ok" && row.summary
+      ? ` ${green(`· ${row.summary}`)}`
+      : "";
+    const line = truncateToWidth(
+      ` ${styledGlyph} ${label}${detail}${suffix}${summary}`,
+      width,
+    );
+    if (row.status !== "failed" || !row.error) return [line];
+    // Failed rows get a quiet second line with the error, keeping the
+    // failure readable without dumping raw tool output into the stream.
+    const errorLine = truncateToWidth(`  ${dim("·")} ${yellow(row.error)}`, width);
+    return [line, errorLine];
   }
 }
 
