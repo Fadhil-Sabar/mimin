@@ -1241,6 +1241,43 @@ describe("lightweight pi-tui areas", () => {
     expect(cancelled).toBe(1);
   });
 
+  test("footer masked key prompt accepts bracketed paste (Ctrl+V) masked", async () => {
+    let submitted: { provider: string; key: string } | undefined;
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      onSubmitKey: (provider, key) => { submitted = { provider, key }; },
+    });
+    footer.beginKeyPrompt("openrouter");
+    // Terminal delivers a paste wrapped in bracketed-paste markers.
+    footer.handleInput("\u001b[200~sk-pasted-key-abcdef\x1b[201~");
+    const rendered = textOf(footer.render(80));
+    // The pasted content is masked, never rendered in plaintext.
+    expect(rendered).not.toContain("sk-pasted-key-abcdef");
+    expect(rendered).toContain("•".repeat("sk-pasted-key-abcdef".length));
+    // The editor buffer stays empty.
+    expect(footer.editor.getText()).toBe("");
+    // Enter submits the pasted key.
+    footer.handleInput("\r");
+    expect(submitted).toEqual({ provider: "openrouter", key: "sk-pasted-key-abcdef" });
+  });
+
+  test("footer masked key prompt accepts a split bracketed paste across events", async () => {
+    let submitted: { provider: string; key: string } | undefined;
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      onSubmitKey: (provider, key) => { submitted = { provider, key }; },
+    });
+    footer.beginKeyPrompt("openrouter");
+    // Paste may arrive in chunks: opener+part1, then part2+terminator.
+    footer.handleInput("\u001b[200~sk-split-1");
+    footer.handleInput("split-2\x1b[201~");
+    footer.handleInput("\r");
+    expect(submitted).toEqual({ provider: "openrouter", key: "sk-split-1split-2" });
+    expect(textOf(footer.render(80))).not.toContain("sk-split");
+  });
+
   test("/session dropdown lists sessions and arrow+Tab applies the id", async () => {
     const footer = new Footer({
       managerModel: "gpt-5.5",

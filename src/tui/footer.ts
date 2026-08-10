@@ -213,6 +213,7 @@ export class Footer implements Component, Focusable {
   private readonly optionsOnCancelKey?: () => void;
   private readonly optionsOnSubmitError?: (error: unknown) => void;
   private keyPrompt: { provider: string; buffer: string } | undefined;
+  private inKeyPaste = false;
 
   constructor(options: FooterOptions) {
     this.optionsRequestRender = options.requestRender;
@@ -329,6 +330,7 @@ export class Footer implements Component, Focusable {
   /** Begin a masked API-key prompt for a provider. */
   beginKeyPrompt(provider: string): void {
     this.keyPrompt = { provider, buffer: "" };
+    this.inKeyPaste = false;
     this.refresh();
     this.optionsRequestRender?.();
   }
@@ -341,6 +343,7 @@ export class Footer implements Component, Focusable {
   /** Cancel the active key prompt (Escape). */
   cancelKeyPrompt(): void {
     this.keyPrompt = undefined;
+    this.inKeyPaste = false;
     this.refresh();
     this.optionsRequestRender?.();
   }
@@ -350,6 +353,7 @@ export class Footer implements Component, Focusable {
     if (data === "\r" || data === "\n") {
       const { provider, buffer } = this.keyPrompt;
       this.keyPrompt = undefined;
+      this.inKeyPaste = false;
       this.refresh();
       this.optionsRequestRender?.();
       void Promise.resolve(this.optionsOnSubmitKey?.(provider, buffer))
@@ -359,15 +363,45 @@ export class Footer implements Component, Focusable {
     }
     if (matchesKey(data, Key.escape)) {
       this.keyPrompt = undefined;
+      this.inKeyPaste = false;
       this.refresh();
       this.optionsRequestRender?.();
       this.optionsOnCancelKey?.();
       return;
     }
     if (data === "\u007f" || data === "\b") {
+      if (this.inKeyPaste) return; // backspace during paste is part of the paste
       this.keyPrompt = { ...this.keyPrompt, buffer: this.keyPrompt.buffer.slice(0, -1) };
       this.refresh();
       this.optionsRequestRender?.();
+      return;
+    }
+    // Bracketed paste (Ctrl+V / terminal paste): the terminal wraps the pasted
+    // text in \x1b[200~ ... \x1b[201~. Content may span multiple events.
+    if (data.includes("\x1b[200~")) {
+      this.inKeyPaste = true;
+      data = data.replace("\x1b[200~", "");
+    }
+    if (this.inKeyPaste) {
+      const endIndex = data.indexOf("\x1b[201~");
+      if (endIndex === -1) {
+        // More paste content is coming; accumulate (masked).
+        if (data.length > 0) {
+          this.keyPrompt = { ...this.keyPrompt, buffer: this.keyPrompt.buffer + data };
+          this.refresh();
+          this.optionsRequestRender?.();
+        }
+        return;
+      }
+      const content = data.slice(0, endIndex);
+      const remaining = data.slice(endIndex + "\x1b[201~".length);
+      if (content.length > 0) {
+        this.keyPrompt = { ...this.keyPrompt, buffer: this.keyPrompt.buffer + content };
+        this.refresh();
+        this.optionsRequestRender?.();
+      }
+      this.inKeyPaste = false;
+      if (remaining.length > 0) this.handleKeyInput(remaining);
       return;
     }
     // Only printable characters are accepted; control sequences are ignored.
