@@ -19,6 +19,7 @@ class FakeTui implements TuiHost {
   starts = 0;
   stops = 0;
   renders = 0;
+  writes: string[] = [];
 
   addChild(component: Component): void {
     this.children.push(component);
@@ -54,6 +55,8 @@ class FakeTui implements TuiHost {
   }
 
   forcedRenders = 0;
+  /** Test seam: a fake terminal exposing row height to the app. */
+  terminal?: { rows: number; write?: (data: string) => void };
 }
 
 function expectWidth(lines: string[], width: number): void {
@@ -302,6 +305,50 @@ describe("lightweight pi-tui areas", () => {
     expect(exited).toBe(true);
     expect(host.starts).toBe(1);
     expect(host.stops).toBe(1);
+  });
+
+  test("decodes SGR wheel input and brackets real TUI lifecycle with mouse tracking", () => {
+    const host = new FakeTui();
+    host.terminal = {
+      rows: 12,
+      write: (data: string) => host.writes.push(data),
+    };
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: host,
+    });
+    for (let i = 0; i < 30; i += 1) app.addInfo(`info ${i}`);
+
+    const tail = textOf(app.render(80));
+    expect(tail).toContain("info 29");
+    // A wheel-down at the already-rendered tail must not disable autoscroll.
+    expect(host.listener?.("\u001b[<65;10;5m")).toEqual({ consume: true });
+    expect(app.transcript.isTailAnchored()).toBe(true);
+    app.startManagerStream("bottom stream");
+    app.appendManagerDelta("newest delta after bottom wheel");
+    expect(textOf(app.render(80))).toContain("newest delta after bottom wheel");
+
+    app.start();
+    app.start();
+    expect(host.writes).toEqual(["\u001b[?1000h\u001b[?1006h"]);
+
+    for (let i = 0; i < 6; i += 1) {
+      expect(host.listener?.("\u001b[<64;10;5M")).toEqual({ consume: true });
+    }
+    const pagedUp = textOf(app.render(80));
+    expect(pagedUp).not.toContain("info 29");
+    for (let i = 0; i < 6; i += 1) {
+      expect(host.listener?.("\u001b[<65;10;5m")).toEqual({ consume: true });
+    }
+    expect(textOf(app.render(80))).toContain("info 29");
+
+    app.stop();
+    app.stop();
+    expect(host.writes).toEqual([
+      "\u001b[?1000h\u001b[?1006h",
+      "\u001b[?1006l\u001b[?1000l",
+    ]);
   });
 
   test("tool rows render compactly with success summarized and errors visible", () => {
@@ -722,14 +769,15 @@ describe("lightweight pi-tui areas", () => {
   test("transcript is bounded to the viewport so streaming does not yank the scroll position", () => {
     const host = new FakeTui();
     // Expose a terminal height so the app caps the transcript to the viewport.
-    (host as FakeTui & { terminal?: { rows: number } }).terminal = { rows: 24 };
+    host.terminal = { rows: 24, write: () => {} };
     const app = createApp({
       managerModel: "test-model",
       workspace: "/repo/project",
       tui: host,
     });
-    // Fill beyond the viewport, then scroll up.
+    // Fill beyond the viewport, then render so paging uses measured rows.
     for (let i = 0; i < 40; i += 1) app.addInfo(`info ${i}`);
+    app.render(80);
     app.transcript.scrollUp(12);
     const before = app.render(80);
     // Stream a long manager response (grows the body).
@@ -746,9 +794,40 @@ describe("lightweight pi-tui areas", () => {
     expect(after.join("\n")).not.toContain("Answer:");
   });
 
+  test("manager streaming follows the tail but preserves an intentional scroll-up", () => {
+    const host = new FakeTui();
+    host.terminal = { rows: 24 };
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: host,
+    });
+    for (let i = 0; i < 40; i += 1) app.addInfo(`info ${i}`);
+    app.render(80);
+    expect(app.transcript.isTailAnchored()).toBe(true);
+
+    app.startManagerStream("stream start");
+
+    app.appendManagerDelta(" first streamed delta");
+    expect(textOf(app.render(80))).toContain("first streamed delta");
+    expect(app.transcript.isTailAnchored()).toBe(true);
+    app.appendManagerDelta(" newest streamed text");
+    expect(textOf(app.render(80))).toContain("newest streamed text");
+
+    app.transcript.scrollUp(12);
+    const beforeScrolled = app.render(80);
+    expect(app.transcript.isTailAnchored()).toBe(false);
+    app.appendManagerDelta(" hidden while intentionally scrolled up");
+    const afterScrolled = app.render(80);
+    expect(afterScrolled.length).toBe(beforeScrolled.length);
+    expect(afterScrolled[2]).toBe(beforeScrolled[2]);
+    expect(textOf(afterScrolled)).not.toContain("hidden while intentionally scrolled up");
+  });
+
+
   test("End restores autoscroll so new content is visible again", () => {
     const host = new FakeTui();
-    (host as FakeTui & { terminal?: { rows: number } }).terminal = { rows: 24 };
+    host.terminal = { rows: 24 };
     const app = createApp({
       managerModel: "test-model",
       workspace: "/repo/project",
@@ -839,9 +918,10 @@ describe("lightweight pi-tui areas", () => {
     expect(initial).not.toContain("two");
     expect(transcript.scrollUp(10)).toBe(true);
     const paged = transcript.render(40).join("\n");
-    // One page up from the tail shows a middle window, not the head or tail.
-    expect(paged).toContain("three");
-    expect(paged).toContain("six");
+    // One page up from the tail advances by page size while the viewport
+    // itself remains sized from maxLines minus the status row.
+    expect(paged).toContain("two");
+    expect(paged).toContain("five");
     expect(paged).not.toContain("one");
     expect(paged).not.toContain("eight");
     expect(transcript.scrollUp(10)).toBe(true);
@@ -849,6 +929,13 @@ describe("lightweight pi-tui areas", () => {
     // Fully scrolled to the head; the tail entry is off-window.
     expect(top).toContain("one");
     expect(top).not.toContain("eight");
+    // Paging down advances without following until the true viewport bottom.
+    expect(transcript.scrollDown(10)).toBe(true);
+    expect(transcript.isTailAnchored()).toBe(false);
+    expect(transcript.scrollDown(10)).toBe(true);
+    expect(transcript.isTailAnchored()).toBe(true);
+    // A wheel/page-down at the pinned tail is a no-op.
+    expect(transcript.scrollDown(10)).toBe(false);
     expect(transcript.scrollToBottom());
     expect(transcript.render(40).join("\n")).toContain("eight");
   });

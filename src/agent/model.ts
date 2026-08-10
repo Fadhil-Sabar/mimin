@@ -1,4 +1,4 @@
-import { getModel } from "@mariozechner/pi-ai";
+import { getModel, getModels } from "@mariozechner/pi-ai";
 import type { Api, Model } from "@mariozechner/pi-ai";
 import type { RoleConfig } from "../config.js";
 import {
@@ -37,11 +37,51 @@ export const resolveConfiguredModel: ModelResolver = (provider, modelId) => {
   return model;
 };
 
+/** First model pi-ai registers for a provider, or undefined. */
+function defaultModelForProvider(provider: string): Model<Api> | undefined {
+  if (isCommandCodeProvider(provider)) return undefined;
+  try {
+    const dynamicGetModels = getModels as unknown as (configured: string) => Model<Api>[];
+    const known = dynamicGetModels(provider);
+    if (!Array.isArray(known) || known.length === 0) return undefined;
+    return known[0]!;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Resolve a role's model. An empty model id means "inherit": use the
+ * fallback role's model when its provider matches, else the provider's first
+ * registered model (pi-ai). Unknown providers/models throw with a helpful
+ * message.
+ */
+export function resolveRoleModel(
+  role: RoleConfig,
+  fallback?: RoleConfig,
+  resolver: ModelResolver = resolveConfiguredModel,
+): Model<Api> {
+  const provider = role.provider;
+  if (role.model.length > 0) {
+    return resolver(provider, role.model);
+  }
+  if (fallback && fallback.provider === provider && fallback.model.length > 0) {
+    return resolver(provider, fallback.model);
+  }
+  const fallbackModel = defaultModelForProvider(provider);
+  if (fallbackModel) return fallbackModel;
+  throw new Error(
+    `No model configured for provider ${JSON.stringify(provider)}. ` +
+      `Set a model in config or run /model ${""}to choose one.`,
+  );
+}
+
 export function modelFromRole(
   role: RoleConfig,
   resolver: ModelResolver = resolveConfiguredModel,
+  fallback?: RoleConfig,
 ): Model<Api> {
-  return resolver(role.provider, role.model);
+  return resolveRoleModel(role, fallback, resolver);
 }
 
 export { COMMANDCODE_API_KEY_ENV_VAR };

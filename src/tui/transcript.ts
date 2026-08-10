@@ -119,12 +119,17 @@ export class Transcript extends Container implements Component {
   setMaxLines(maxLines: number): void {
     this.maxLines = Math.max(1, Math.floor(maxLines));
   }
+  /** Absolute row at which the viewport reaches the configured transcript tail. */
+  private viewportBottom(): number {
+    const capacity = Math.max(0, this.maxLines - STATUS_ROWS);
+    return Math.max(0, this.total - capacity);
+  }
 
   /** Page the viewport backward by one page of visible rows. */
   scrollUp(pageSize: number): boolean {
-    const visible = Math.max(1, pageSize - STATUS_ROWS);
-    const start = this.tailAnchored ? this.total - visible : this.head;
-    const next = Math.max(0, start - visible);
+    const step = Math.max(1, pageSize - STATUS_ROWS);
+    const start = this.tailAnchored ? this.viewportBottom() : this.head;
+    const next = Math.max(0, start - step);
     if (next === start) return false;
     this.head = next;
     this.tailAnchored = false;
@@ -133,11 +138,12 @@ export class Transcript extends Container implements Component {
 
   /** Page the viewport forward by one page of visible rows. */
   scrollDown(pageSize: number): boolean {
-    const visible = Math.max(1, pageSize - STATUS_ROWS);
-    const next = Math.min(this.total - visible, this.head + visible);
+    const step = Math.max(1, pageSize - STATUS_ROWS);
+    const bottom = this.viewportBottom();
+    const next = Math.min(bottom, this.head + step);
     if (next === this.head && this.tailAnchored) return false;
     this.head = next;
-    this.tailAnchored = next >= this.total - visible;
+    this.tailAnchored = next >= bottom;
     return true;
   }
 

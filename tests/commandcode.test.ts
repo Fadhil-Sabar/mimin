@@ -162,4 +162,23 @@ describe("built-in provider regression", () => {
     );
     expect(model.id).toBe("commandcode:gpt-5.5");
   });
+
+  test("modelFromRole inherits the fallback role's model when providers match", () => {
+    const resolver = (provider: string, modelId: string) =>
+      commandCodeModel(`${provider}:${modelId}`);
+    // Sidekick has an empty model; the manager's model is the fallback.
+    const model = modelFromRole(
+      { provider: "commandcode", model: "", thinking: "low" },
+      resolver,
+      { provider: "commandcode", model: "gpt-5.6-sol", thinking: "medium" },
+    );
+    expect(model.id).toBe("commandcode:gpt-5.6-sol");
+  });
+
+  test("modelFromRole with an empty model and no fallback uses the provider default", () => {
+    // A built-in provider's first registered model is used as the default.
+    const model = modelFromRole({ provider: "anthropic", model: "", thinking: "low" });
+    expect(model.provider).toBe("anthropic");
+    expect(model.id.length).toBeGreaterThan(0);
+  });
 });

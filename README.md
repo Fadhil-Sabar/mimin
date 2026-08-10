@@ -51,17 +51,21 @@ Configuration is merged in this order, with later layers winning:
 3. project `<cwd>/.mimin/config.json`;
 4. `MIMIN_DATA_DIR` for the persistent data-directory override.
 
-Nested role objects merge, so a project can override only its manager model or thinking level. A complete base config needs non-empty `provider`, `model`, and a thinking value (`off`, `minimal`, `low`, `medium`, `high`, or `xhigh`) for both roles. `provider` accepts any built-in pi-ai provider id (e.g. `anthropic`, `openai`, `openrouter`) or the custom `commandcode` provider described above:
+Nested role objects merge, so a project can override only its manager model or thinking level. Each role's `provider` is optional: a role without a `provider` inherits the **other role's** provider (the global provider), so you only ever configure the provider once. The `model` is optional too — a role without a `model` uses the other role's model when providers match, or the provider's first registered model. At least one role must set a `provider`, and each role keeps its own `thinking` and optional `maxTurns` (positive safe integer; default 24 for the manager, 8 for the sidekick) bounding how many model turns one run may take. `provider` accepts any built-in pi-ai provider id (e.g. `anthropic`, `openai`, `openrouter`) or the custom `commandcode` provider described above.
 
 ```json
 {
   "dataDir": "~/.mimin/data",
   "manager": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "medium" },
-  "sidekick": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "low" }
+  "sidekick": { "model": "claude-sonnet-4-6", "thinking": "low" }
 }
 ```
 
+The sidekick above inherits the manager's provider (`anthropic`); only one provider is configured.
+
 The current working directory is always the workspace and determines project-memory identity.
+
+Credentials are resolved in this order: **environment variables first, then `auth.json`** (via `/provider`). Stored keys never override an exported environment variable.
 
 An optional `memory` section controls automatic long-term memory learning:
 
@@ -94,10 +98,11 @@ Slash commands are intercepted in interactive mode before any model call. Typing
 /help
 
 /model
-/model manager <model-id>
-/model sidekick <model-id>
+/model manager <provider-id> <model-id>
+/model sidekick <provider-id> <model-id>
 
 /provider
+/provider <provider-id>
 
 /session
 /session <session-id>

@@ -94,6 +94,9 @@ export interface RunSidekickOptions {
   runConfig?: Omit<AgentRunConfig, "thinking">;
   /** Provider API key resolved from auth.json by the CLI layer (env wins). */
   authKey?: string;
+  /** The manager role; used as the model fallback when the sidekick's own
+   *  provider/model is empty (inherit). */
+  managerRole?: RoleConfig;
   signal?: AbortSignal;
   onActivity?: SidekickActivityCallback;
   now?: () => number;
@@ -315,7 +318,8 @@ export async function runSidekick(
   let runResult: RunAgentResult;
   try {
     const model =
-      options.model ?? modelFromRole(options.config, options.modelResolver);
+      options.model ??
+      modelFromRole(options.config, options.modelResolver, options.managerRole);
     const run = options.run ?? ((runOptions) => runAgent(runOptions));
     runResult = await run({
       model,

@@ -26,7 +26,7 @@ import { suggestProviders, suggestProvidersWithAuth } from "./tui/provider-sugge
 import { credentialAvailable } from "./tui/provider-suggestions.js";
 import type { ProviderSuggestionSource } from "./tui/provider-suggestions.js";
 
-export const CLI_VERSION = "0.2.0";
+export const CLI_VERSION = "0.2.1";
 
 export type ParsedCliArguments =
   | { mode: "help" }
@@ -201,6 +201,14 @@ function compactMemoryResults(results: MemorySearchResult[]): string {
 const ROLES = ["manager", "sidekick"] as const;
 type ModelRole = (typeof ROLES)[number];
 
+/** The role's effective provider: its own, or the other role's (global). */
+function runtimeProvider(runtime: AgentRuntime, role: ModelRole): string {
+  const self = runtime[role].provider;
+  if (self.length > 0) return self;
+  const other = role === "manager" ? runtime.sidekick : runtime.manager;
+  return other.provider;
+}
+
 function modelRole(value: string | undefined): ModelRole | undefined {
   return ROLES.find((role) => role === value);
 }
@@ -352,7 +360,7 @@ async function handleModelCommand(
   let provider: string;
   let modelId: string;
   if (args.length === 1) {
-    provider = options.runtime[role].provider;
+    provider = runtimeProvider(options.runtime, role);
     modelId = args[0]!;
   } else {
     provider = args[0]!;
@@ -553,6 +561,12 @@ async function runDirect(
       lastWasNewline = text.endsWith("\n");
     }
     if (!lastWasNewline) io.stdout("\n");
+    if (result.status === "max_turns") {
+      io.stderr(
+        `Manager reached max_turns after ${result.turns} turn${result.turns === 1 ? "" : "s"}; output may be partial.\n`,
+      );
+      return 1;
+    }
     if (result.status !== "completed") {
       io.stderr(`Manager stopped with status ${result.status}${result.error ? `: ${terminalText(result.error, 2_000)}` : ""}.\n`);
       return result.status === "aborted" ? 130 : 1;
@@ -609,7 +623,7 @@ async function runInteractive(
     managerModel: `${config.manager.provider}/${config.manager.model}`,
     workspace,
     thinking: config.manager.thinking,
-    roleProviders: (role) => runtime[role].provider,
+    roleProviders: (role) => runtimeProvider(runtime, role),
     suggestProviders: providers,
     sessionSource: sessionSuggestionsFromStore(store),
     onExit: () => finish(0),
@@ -691,10 +705,11 @@ async function runInteractive(
       let completed = false;
       let authKey: string | undefined;
       try {
+        const managerProvider = runtimeProvider(runtime, "manager");
         if (auth) {
           try {
             authKey = await auth.effectiveKey(
-              runtime.manager.provider,
+              managerProvider,
               COMMANDCODE_API_KEY_ENV_VAR,
             );
           } catch {
@@ -729,7 +744,14 @@ async function runInteractive(
         });
         sessionId = result.sessionId;
         completed = result.status === "completed";
-        if (!completed) {
+        if (result.status === "max_turns") {
+          if (result.finalText && !receivedManagerText) {
+            app?.addManager(terminalText(result.finalText, 256 * 1024));
+          }
+          app?.addInfo(
+            `Manager reached max_turns after ${result.turns} turn${result.turns === 1 ? "" : "s"}; output may be partial.`,
+          );
+        } else if (!completed) {
           app?.addError(
             `Manager stopped with status ${result.status}${result.error ? `: ${terminalText(result.error, 2_000)}` : ""}.`,
           );

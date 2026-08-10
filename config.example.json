@@ -3,11 +3,12 @@
   "manager": {
     "provider": "anthropic",
     "model": "claude-sonnet-4-6",
-    "thinking": "medium"
+    "thinking": "medium",
+    "maxTurns": 24
   },
   "sidekick": {
-    "provider": "anthropic",
     "model": "claude-sonnet-4-6",
-    "thinking": "low"
+    "thinking": "low",
+    "maxTurns": 8
   }
 }

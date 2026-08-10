@@ -72,6 +72,7 @@ export function createManagerTools(
       run: options.sidekickRun,
       systemPrompt: options.sidekickSystemPrompt,
       runConfig: options.sidekickRunConfig,
+      managerRole: options.config.manager,
     },
     run: options.sidekickRunner,
     maxConcurrency: options.maxDelegationConcurrency,

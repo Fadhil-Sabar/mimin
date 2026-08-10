@@ -12,11 +12,13 @@ const roles: { manager: RoleConfig; sidekick: RoleConfig } = {
     provider: "manager-provider",
     model: "manager-model",
     thinking: "low",
+    maxTurns: 11,
   },
   sidekick: {
     provider: "sidekick-provider",
     model: "sidekick-model",
     thinking: "medium",
+    maxTurns: 13,
   },
 };
 
@@ -72,11 +74,13 @@ describe("layered config", () => {
       provider: "manager-provider",
       model: "project-manager-model",
       thinking: "low",
+      maxTurns: 11,
     });
     expect(config.sidekick).toEqual({
       provider: "sidekick-provider",
       model: "sidekick-model",
       thinking: "high",
+      maxTurns: 13,
     });
     expect(config.dataDir).toBe(join(project, "project-data"));
   });
@@ -148,6 +152,29 @@ describe("layered config", () => {
     ).rejects.toBeInstanceOf(ConfigValidationError);
   });
 
+  test("defaults and validates bounded role maxTurns", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), {
+      manager: { provider: "provider", model: "manager", thinking: "medium" },
+      sidekick: { provider: "provider", model: "sidekick", thinking: "low" },
+    });
+    const defaults = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(defaults.manager.maxTurns).toBe(24);
+    expect(defaults.sidekick.maxTurns).toBe(8);
+
+    await writeJson(join(project, ".mimin", "config.json"), {
+      manager: { provider: "provider", model: "manager", thinking: "medium", maxTurns: 0 },
+      sidekick: { provider: "provider", model: "sidekick", thinking: "low", maxTurns: 1.5 },
+    });
+    await expect(loadConfig({ cwd: project, homeDir: home, env: {}}))
+      .rejects.toMatchObject({
+        issues: [
+          "manager.maxTurns must be a positive safe integer",
+          "sidekick.maxTurns must be a positive safe integer",
+        ],
+      });
+  });
+
   test("memory.auto defaults to true and merges across layers", async () => {
     const { root, home, project } = await fixture();
     await writeJson(join(home, ".mimin", "config.json"), {
@@ -177,5 +204,56 @@ describe("layered config", () => {
     await expect(
       loadConfig({ cwd: project, homeDir: home, env: {} }),
     ).rejects.toBeInstanceOf(ConfigValidationError);
+  });
+
+  test("a role with an empty provider inherits the other role's provider (global)", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), {
+      manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "medium" },
+      // No sidekick.provider: it should inherit "anthropic".
+      sidekick: { model: "claude-sonnet-4-6", thinking: "low" },
+    });
+
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(config.manager.provider).toBe("anthropic");
+    expect(config.sidekick.provider).toBe("anthropic");
+    expect(config.sidekick.model).toBe("claude-sonnet-4-6");
+  });
+
+  test("provider can be configured only on the sidekick and the manager inherits it", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), {
+      manager: { model: "gpt-5.5", thinking: "medium" },
+      sidekick: { provider: "openrouter", model: "gpt-5.5", thinking: "low" },
+    });
+
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(config.manager.provider).toBe("openrouter");
+    expect(config.sidekick.provider).toBe("openrouter");
+    expect(config.manager.model).toBe("gpt-5.5");
+  });
+
+  test("neither role with a provider is rejected with a clear error", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), {
+      manager: { model: "gpt-5.5", thinking: "medium" },
+      sidekick: { model: "gpt-5.5", thinking: "low" },
+    });
+
+    await expect(loadConfig({ cwd: project, homeDir: home, env: {} }))
+      .rejects.toMatchObject({
+        issues: ["at least one of manager.provider or sidekick.provider must be set"],
+      });
+  });
+
+  test("an empty model inherits the other role's model when providers match", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), {
+      manager: { provider: "openrouter", model: "gpt-5.5", thinking: "medium" },
+      sidekick: { provider: "openrouter", thinking: "low" },
+    });
+
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(config.sidekick.model).toBe("gpt-5.5");
   });
 });

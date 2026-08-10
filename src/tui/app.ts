@@ -29,7 +29,7 @@ export interface TuiHost {
   stop(): void;
   requestRender(force?: boolean): void;
   /** Terminal dimensions; the transcript is bounded to the visible rows. */
-  terminal?: { rows: number };
+  terminal?: { rows: number; write?: (data: string) => void };
 }
 
 /** Broad structural stream event accepted without importing agent or pi-ai types. */
@@ -69,6 +69,18 @@ export interface AgentTuiOptions {
 const TICK_INTERVAL_MS = 1_000;
 /** One page of transcript rows scrolled per PageUp/PageDown press. */
 const SCROLL_PAGE = 12;
+/** Number of transcript rows moved by one mouse-wheel tick. */
+const SCROLL_WHEEL = 3;
+const MOUSE_TRACKING_ENABLE = "\u001b[?1000h\u001b[?1006h";
+const MOUSE_TRACKING_DISABLE = "\u001b[?1006l\u001b[?1000l";
+
+function mouseWheelDirection(data: string): "up" | "down" | undefined {
+  const match = /^\u001b\[<(\d+);\d+;\d+[Mm]$/.exec(data);
+  if (!match) return undefined;
+  if (match[1] === "64") return "up";
+  if (match[1] === "65") return "down";
+  return undefined;
+}
 
 const SECOND_CONFIRMATION =
   "Ctrl-C again to exit (Escape cancels the active run).";
@@ -106,15 +118,20 @@ export class AgentTui {
   private readonly toolBlockByTurn = new Map<number, string>();
   private runState: HeaderRunState = "idle";
   private started = false;
+  private mouseTrackingEnabled = false;
+  private readonly writeTerminal?: (data: string) => void;
   private tickTimer?: Timer;
   private lastTranscriptMaxLines = 0;
   private exitArmed = false;
   private exitArmedAt = 0;
   private readonly onExit?: () => void | Promise<void>;
   private readonly onToggleSidekick?: (identifier: number | string) => void;
-
   constructor(options: AgentTuiOptions) {
-    this.tui = options.tui ?? new TUI(options.terminal ?? new ProcessTerminal());
+    const terminal = options.terminal ?? new ProcessTerminal();
+    this.tui = options.tui ?? new TUI(terminal);
+    const hostTerminal = options.tui?.terminal;
+    this.writeTerminal = hostTerminal?.write?.bind(hostTerminal)
+      ?? (options.tui ? undefined : terminal.write.bind(terminal));
     this.onExit = options.onExit;
     this.onToggleSidekick = options.onToggleSidekick;
     this.header = new Header({
@@ -168,6 +185,17 @@ export class AgentTui {
     this.tui.addChild(this.footer);
     this.tui.setFocus(this.footer);
     this.tui.addInputListener((data) => {
+      const wheelDirection = mouseWheelDirection(data);
+      if (wheelDirection === "up") {
+        this.transcript.scrollUp(SCROLL_WHEEL);
+        this.requestRender();
+        return { consume: true };
+      }
+      if (wheelDirection === "down") {
+        this.transcript.scrollDown(SCROLL_WHEEL);
+        this.requestRender();
+        return { consume: true };
+      }
       if (matchesKey(data, Key.pageUp)) {
         this.transcript.scrollUp(SCROLL_PAGE);
         this.requestRender();
@@ -199,6 +227,7 @@ export class AgentTui {
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.enableMouseTracking();
     this.tickTimer = setInterval(() => {
       if (this.runState === "idle") return;
       this.header.invalidate();
@@ -218,7 +247,20 @@ export class AgentTui {
       clearInterval(this.tickTimer);
       this.tickTimer = undefined;
     }
+    this.disableMouseTracking();
     this.tui.stop();
+  }
+
+  private enableMouseTracking(): void {
+    if (this.mouseTrackingEnabled || !this.writeTerminal) return;
+    this.writeTerminal(MOUSE_TRACKING_ENABLE);
+    this.mouseTrackingEnabled = true;
+  }
+
+  private disableMouseTracking(): void {
+    if (!this.mouseTrackingEnabled || !this.writeTerminal) return;
+    this.writeTerminal(MOUSE_TRACKING_DISABLE);
+    this.mouseTrackingEnabled = false;
   }
 
   requestRender(force = false): void {

@@ -6,10 +6,21 @@ export const MIMIN_DATA_DIR_ENV_VAR = "MIMIN_DATA_DIR" as const;
 
 export type ThinkingSetting = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
+export const DEFAULT_MANAGER_MAX_TURNS = 24;
+export const DEFAULT_SIDEKICK_MAX_TURNS = 8;
+
 export interface RoleConfig {
+  /**
+   * Provider id. Empty means "inherit": the role uses the same provider as
+   * the other role (the global provider), resolved at load time. Only
+   * non-empty values are validated as real providers.
+   */
   provider: string;
+  /** Model id. Empty inherits the other role's model when providers match. */
   model: string;
   thinking: ThinkingSetting;
+  /** Maximum number of model turns for this role run. */
+  maxTurns?: number;
 }
 
 export interface MemoryConfig {
@@ -128,6 +139,22 @@ function requiredString(
   return value.trim();
 }
 
+/** String-or-empty: empty values are valid (inherit / unset sentinels). */
+function optionalString(
+  object: RawObject,
+  key: string,
+  path: string,
+  issues: string[],
+): string {
+  const value = object[key];
+  if (value === undefined) return "";
+  if (typeof value !== "string") {
+    issues.push(`${path}.${key} must be a string when present`);
+    return "";
+  }
+  return value.trim();
+}
+
 function thinkingValue(
   object: RawObject,
   path: string,
@@ -149,6 +176,21 @@ function thinkingValue(
   return value as ThinkingSetting;
 }
 
+function maxTurnsValue(
+  object: RawObject,
+  path: string,
+  issues: string[],
+  defaultMaxTurns: number,
+): number {
+  const value = object.maxTurns;
+  if (value === undefined) return defaultMaxTurns;
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
+    issues.push(`${path}.maxTurns must be a positive safe integer`);
+    return defaultMaxTurns;
+  }
+  return value;
+}
+
 function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
   const issues: string[] = [];
   const manager = isObject(raw.manager) ? raw.manager : undefined;
@@ -157,14 +199,20 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
   if (!sidekick) issues.push("sidekick must be an object");
 
   const managerConfig: RoleConfig = {
-    provider: manager ? requiredString(manager, "provider", "manager", issues) : "",
-    model: manager ? requiredString(manager, "model", "manager", issues) : "",
+    provider: manager ? optionalString(manager, "provider", "manager", issues) : "",
+    model: manager ? optionalString(manager, "model", "manager", issues) : "",
     thinking: manager ? thinkingValue(manager, "manager", issues) : "medium",
+    maxTurns: manager
+      ? maxTurnsValue(manager, "manager", issues, DEFAULT_MANAGER_MAX_TURNS)
+      : DEFAULT_MANAGER_MAX_TURNS,
   };
   const sidekickConfig: RoleConfig = {
-    provider: sidekick ? requiredString(sidekick, "provider", "sidekick", issues) : "",
-    model: sidekick ? requiredString(sidekick, "model", "sidekick", issues) : "",
+    provider: sidekick ? optionalString(sidekick, "provider", "sidekick", issues) : "",
+    model: sidekick ? optionalString(sidekick, "model", "sidekick", issues) : "",
     thinking: sidekick ? thinkingValue(sidekick, "sidekick", issues) : "medium",
+    maxTurns: sidekick
+      ? maxTurnsValue(sidekick, "sidekick", issues, DEFAULT_SIDEKICK_MAX_TURNS)
+      : DEFAULT_SIDEKICK_MAX_TURNS,
   };
 
   const memoryRaw = isObject(raw.memory) ? raw.memory : {};
@@ -177,7 +225,35 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
   };
 
   if (issues.length > 0) throw new ConfigValidationError(issues);
-  return { dataDir, manager: managerConfig, sidekick: sidekickConfig, memory: memoryConfig };
+
+  // Global-provider inheritance: a role with an empty provider uses the other
+  // role's provider (whichever side configured one); a role with an empty
+  // model uses the other role's model when the resolved providers match.
+  const configuredManager = managerConfig.provider.length > 0;
+  const configuredSidekick = sidekickConfig.provider.length > 0;
+  if (!configuredManager && !configuredSidekick) {
+    throw new ConfigValidationError([
+      "at least one of manager.provider or sidekick.provider must be set",
+    ]);
+  }
+  const globalProvider = configuredManager
+    ? managerConfig.provider
+    : sidekickConfig.provider;
+  if (!configuredManager) managerConfig.provider = globalProvider;
+  if (!configuredSidekick) sidekickConfig.provider = globalProvider;
+  if (managerConfig.model.length === 0 && managerConfig.provider === sidekickConfig.provider) {
+    managerConfig.model = sidekickConfig.model;
+  }
+  if (sidekickConfig.model.length === 0 && sidekickConfig.provider === managerConfig.provider) {
+    sidekickConfig.model = managerConfig.model;
+  }
+
+  return {
+    dataDir,
+    manager: managerConfig,
+    sidekick: sidekickConfig,
+    memory: memoryConfig,
+  };
 }
 
 async function readConfigFile(pathname: string): Promise<RawObject> {
@@ -202,8 +278,8 @@ export function defaultConfig(options: LoadConfigOptions = {}): AgentConfig {
   const dataDir = defaultDataDir({ ...options, cwd, homeDir: home });
   return {
     dataDir,
-    manager: { provider: "", model: "", thinking: "medium" },
-    sidekick: { provider: "", model: "", thinking: "medium" },
+    manager: { provider: "", model: "", thinking: "medium", maxTurns: DEFAULT_MANAGER_MAX_TURNS },
+    sidekick: { provider: "", model: "", thinking: "medium", maxTurns: DEFAULT_SIDEKICK_MAX_TURNS },
     memory: { auto: true },
   };
 }

@@ -34,8 +34,8 @@ async function fixture(): Promise<{ workspace: string; config: AgentConfig }> {
     workspace,
     config: {
       dataDir: join(workspace, "data"),
-      manager: { provider: "fake", model: "manager", thinking: "off" },
-      sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
+      manager: { provider: "fake", model: "manager", thinking: "off", maxTurns: 17 },
+      sidekick: { provider: "fake", model: "sidekick", thinking: "off", maxTurns: 19 },
       memory: { auto: true },
     },
   };
@@ -161,10 +161,34 @@ describe("CLI argument and noninteractive paths", () => {
     expect(code).toBe(0);
     expect(received?.input).toBe("implement feature");
     expect(received?.workspace).toBe(workspace);
+    expect(received?.config?.manager?.maxTurns).toBe(17);
+    expect(received?.config?.sidekick?.maxTurns).toBe(19);
     expect(io.out).toBe("streamed answer\n");
     expect(io.err).toContain("Sidekick 1/1 started");
     expect(io.err).toContain("complete: changed files");
     expect(io.err).not.toContain("sidekick-safe");
+  });
+
+  test("direct max_turns keeps partial text and reports a limit", async () => {
+    const { workspace, config } = await fixture();
+    const io = captureIo();
+    const code = await runCli(["bounded task"], {
+      cwd: workspace,
+      io,
+      loadConfig: async () => config,
+      runManager: async (options) => ({
+        status: "max_turns",
+        turns: 17,
+        toolCalls: 16,
+        messages: [],
+        sessionId: options.sessionId ?? "manager",
+        finalText: "partial answer",
+      }),
+    });
+    expect(code).toBe(1);
+    expect(io.out).toBe("partial answer\n");
+    expect(io.err).toContain("reached max_turns");
+    expect(io.err).not.toContain("stopped with status max_turns");
   });
 
   test("--continue selects the newest manager session for a direct task", async () => {
@@ -219,6 +243,7 @@ describe("interactive integration", () => {
     const sessions: string[] = [];
     let fakeTui: FakeTui | undefined;
     const code = await runCli([], {
+
       cwd: workspace,
       io: captureIo(),
       loadConfig: async () => config,
@@ -242,6 +267,35 @@ describe("interactive integration", () => {
     expect(sessions[1]).toBe(sessions[0]);
     expect(fakeTui?.starts).toBe(1);
     expect(fakeTui?.stops).toBe(1);
+  });
+
+  test("interactive max_turns shows partial text as a limit notice", async () => {
+    const { workspace, config } = await fixture();
+    let fakeTui: FakeTui | undefined;
+    const code = await runCli([], {
+      cwd: workspace,
+      io: captureIo(),
+      loadConfig: async () => config,
+      runManager: async (options) => ({
+        status: "max_turns",
+        turns: 17,
+        toolCalls: 16,
+        messages: [],
+        sessionId: options.sessionId ?? "manager",
+        finalText: "partial interactive answer",
+      }),
+      createTui: (options) => {
+        fakeTui = new FakeTui(options, async (callbacks) => {
+          await callbacks.onSubmit?.("bounded interactive task");
+          await callbacks.onExit?.();
+        });
+        return fakeTui;
+      },
+    });
+    expect(code).toBe(0);
+    expect(fakeTui?.info).toContain("partial interactive answer");
+    expect(fakeTui?.info.some((text) => text.includes("reached max_turns"))).toBe(true);
+    expect(fakeTui?.errors).toHaveLength(0);
   });
 
   test("/provider autocomplete is wired through the TUI by default", async () => {
