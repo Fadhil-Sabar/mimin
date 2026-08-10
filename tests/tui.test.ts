@@ -1241,6 +1241,34 @@ describe("lightweight pi-tui areas", () => {
     expect(cancelled).toBe(1);
   });
 
+  test("footer masked key prompt truncates a long pasted key to the terminal width", () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+    });
+    footer.beginKeyPrompt("commandcode");
+    // A long pasted key must never overflow the terminal (crash: "Rendered
+    // line exceeds terminal width").
+    const longKey = "sk-" + "x".repeat(400);
+    footer.handleInput(`\u001b[200~${longKey}\x1b[201~`);
+    const rendered = footer.render(60);
+    for (const line of rendered) {
+      const plain = line.replace(/\u001b\[[0-9;]*m/g, "");
+      expect([...plain].length).toBeLessThanOrEqual(60);
+    }
+    // The full key is still submitted despite the truncated display.
+    let submitted: string | undefined;
+    const footer2 = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      onSubmitKey: (_provider, key) => { submitted = key; },
+    });
+    footer2.beginKeyPrompt("commandcode");
+    footer2.handleInput(`\u001b[200~${longKey}\x1b[201~`);
+    footer2.handleInput("\r");
+    expect(submitted).toBe(longKey);
+  });
+
   test("footer masked key prompt accepts bracketed paste (Ctrl+V) masked", async () => {
     let submitted: { provider: string; key: string } | undefined;
     const footer = new Footer({

@@ -423,9 +423,10 @@ export class Footer implements Component, Focusable {
     const rule = width > 0 ? dim("─".repeat(Math.max(1, width))) : "";
     if (this.keyPrompt) {
       const mask = "•".repeat(this.keyPrompt.buffer.length);
+      const line = `${yellow("Enter API key")} ${cyan(this.keyPrompt.provider)} ${dim("(Enter saves · Esc cancels)")}: ${mask}`;
       return [
         rule,
-        `${yellow("Enter API key")} ${cyan(this.keyPrompt.provider)} ${dim("(Enter saves · Esc cancels)")}: ${mask}`,
+        truncateToWidth(line, width),
       ];
     }
     return [
