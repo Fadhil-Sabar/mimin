@@ -1,6 +1,8 @@
 import {
   CombinedAutocompleteProvider,
   Editor,
+  Key,
+  matchesKey,
   TruncatedText,
   truncateToWidth,
   type AutocompleteItem,
@@ -246,8 +248,10 @@ export class Footer implements Component, Focusable {
     // The Editor has no standalone Escape binding, so intercept Escape in a
     // wrapper before it reaches the editor (an open autocomplete list still
     // consumes Escape itself; this only fires on an idle editor).
+    // matchesKey handles both the legacy bare ESC and the CSI-u (Kitty
+    // protocol) escape forms, so cancellation works on every terminal.
     this.handleEscape = (data: string): void => {
-      if (data === "\u001b") {
+      if (matchesKey(data, Key.escape)) {
         void Promise.resolve(options.onCancel?.())
           .catch((error: unknown) => options.onSubmitError?.(error));
         return;

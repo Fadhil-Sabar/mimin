@@ -970,13 +970,17 @@ describe("lightweight pi-tui areas", () => {
         cancelled += 1;
       },
     });
-    // Escape reaches the wrapper and fires onCancel.
+    // Legacy bare Escape reaches the wrapper and fires onCancel.
     footer.handleInput("\u001b");
     expect(cancelled).toBe(1);
+    // Kitty-protocol CSI-u Escape (what modern terminals send after the
+    // \x1b[?u query) must also cancel.
+    footer.handleInput("\u001b[27u");
+    expect(cancelled).toBe(2);
     // Ctrl-C is not Escape; it must reach the editor unchanged so the app's
     // global Ctrl-C handling (exit) still works.
     footer.handleInput("\u0003");
-    expect(cancelled).toBe(1);
+    expect(cancelled).toBe(2);
   });
 
   test("/model sidekick dropdown lists model IDs and arrow+Tab applies", async () => {
