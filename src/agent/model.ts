@@ -50,25 +50,35 @@ export { COMMANDCODE_API_KEY_ENV_VAR };
  * Credential resolution for a role's provider. The Command Code secret is
  * forwarded as the run's `apiKey` ONLY when that exact role uses the
  * `commandcode` provider, so a COMMANDCODE_API_KEY export can never leak
- * into a built-in provider's request. Missing Command Code credentials
- * fail fast with an actionable message; built-in providers never require
- * this env var and always receive `{}`.
+ * into a built-in provider's request. Resolution order: the injected
+ * `storedKey` (resolved from auth.json by the CLI layer), then the
+ * COMMANDCODE_API_KEY env var. Missing Command Code credentials fail fast
+ * with an actionable message; built-in providers never require this and
+ * always receive `{}`.
  */
 export function commandCodeCredentials(
   provider: string,
   env: Record<string, string | undefined> = process.env,
+  storedKey?: string,
 ): { apiKey?: string } {
   if (!isCommandCodeProvider(provider)) {
     return {};
   }
-  const value = env[COMMANDCODE_API_KEY_ENV_VAR];
-  if (typeof value !== "string" || value.trim().length === 0) {
+  // Environment wins (the documented, higher-trust source); the stored key
+  // from auth.json is only a fallback.
+  const envValue = env[COMMANDCODE_API_KEY_ENV_VAR];
+  const value = typeof envValue === "string" && envValue.trim().length > 0
+    ? envValue.trim()
+    : typeof storedKey === "string" && storedKey.trim().length > 0
+      ? storedKey.trim()
+      : undefined;
+  if (typeof value !== "string" || value.length === 0) {
     throw new Error(
       `Command Code API key is required. Set ${COMMANDCODE_API_KEY_ENV_VAR} ` +
-        `to your Command Code API key (see https://commandcode.ai).`, 
+        `or run /provider commandcode to store one (see https://commandcode.ai).`, 
     );
   }
-  return { apiKey: value.trim() };
+  return { apiKey: value };
 }
 
 /** Metadata describing the Command Code provider, for docs and tests. */

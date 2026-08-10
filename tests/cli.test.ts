@@ -13,6 +13,8 @@ import {
   type CliTui,
 } from "../src/cli.js";
 import type { AgentConfig } from "../src/config.js";
+import type { ProviderSuggestionSource } from "../src/tui/provider-suggestions.js";
+import { AuthStore } from "../src/auth.js";
 import { MemoryStore } from "../src/memory/store.js";
 import { SessionStore } from "../src/session/session.js";
 import type { AgentTuiOptions } from "../src/tui/app.js";
@@ -83,6 +85,9 @@ class FakeTui implements CliTui {
   setRunning(value: boolean): void { this.running = value; }
   clearInput(): void { this.clearedInput = true; }
   clearedInput = false;
+  keyPromptProvider: string | undefined;
+  promptForKey(provider: string): void { this.keyPromptProvider = provider; }
+  cancelKeyPrompt(): void { this.keyPromptProvider = undefined; }
   restored: { role: "user" | "manager"; text: string }[][] = [];
   restoreSession(entries: { role: "user" | "manager"; text: string }[]): void {
     this.restored.push(entries);
@@ -239,6 +244,31 @@ describe("interactive integration", () => {
     expect(fakeTui?.stops).toBe(1);
   });
 
+  test("/provider autocomplete is wired through the TUI by default", async () => {
+    const { workspace, config } = await fixture();
+    let tuiSuggestProviders: ProviderSuggestionSource | undefined;
+    const code = await runCli([], {
+      cwd: workspace,
+      io: captureIo(),
+      loadConfig: async () => config,
+      runManager: async (options) => completed(options.sessionId ?? "missing"),
+      createTui: (options) => {
+        tuiSuggestProviders = options.suggestProviders;
+        return new FakeTui(options, async (callbacks) => {
+          await callbacks.onExit?.();
+        });
+      },
+    });
+
+    expect(code).toBe(0);
+    // Without an injected source, the real provider list is wired so the
+    // /provider dropdown shows providers (including the custom commandcode).
+    expect(typeof tuiSuggestProviders).toBe("function");
+    const providers = await tuiSuggestProviders?.();
+    expect(providers?.some((item) => item.id === "commandcode")).toBe(true);
+    expect(providers?.some((item) => item.id === "anthropic")).toBe(true);
+  });
+
   test("Escape cancels an active manager run via the abort signal", async () => {
     const { workspace, config } = await fixture();
     let aborted = false;
@@ -369,7 +399,7 @@ describe("interactive integration", () => {
     expect(errors).toEqual([]);
   });
 
-  test("/provider never switches roles and ignores arguments", async () => {
+  test("/provider exact id triggers key setup; never switches roles", async () => {
     const { workspace, config } = await fixture();
     const runtime = new AgentRuntime(config);
     const info: string[] = [];
@@ -383,21 +413,48 @@ describe("interactive integration", () => {
       suggestProviders: async () => [{ id: "openrouter" }],
     };
 
-    // Typing a provider id is not a switch: it filters the info view.
+    // An exact provider id that is not configured (no auth, no env) explains
+    // how to configure it; it never switches a role.
     expect(await handleInteractiveCommand("/provider openrouter", options)).toBe(true);
     expect(runtime.manager.provider).toBe("fake");
     expect(runtime.sidekick.provider).toBe("fake");
-    expect(info.at(-1)).toContain("Providers matching openrouter");
-    expect(info.at(-1)).toContain("openrouter");
+    expect(info.at(-1)).toContain("openrouter is not configured");
     expect(errors).toEqual([]);
 
-    // Role-like arguments are just part of the query filter, never a switch.
+    // Multi-token input is still treated as a filter, never a switch.
     expect(await handleInteractiveCommand("/provider manager openai", options)).toBe(true);
     expect(runtime.manager.provider).toBe("fake");
     expect(runtime.sidekick.provider).toBe("fake");
     expect(info.at(-1)).toContain("Providers matching manager openai");
     expect(info.at(-1)).toContain("(no matching providers)");
     expect(errors).toEqual([]);
+  });
+
+  test("/provider exact id prompts for a key when auth is available", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    let prompted: string | undefined;
+    let cancelled = 0;
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      suggestProviders: async () => [{ id: "openrouter" }],
+      auth: new AuthStore({ dataDir: config.dataDir, env: {} }),
+      promptForKey: (provider: string) => { prompted = provider; },
+      cancelKeyPrompt: () => { cancelled += 1; },
+    };
+
+    // Not configured → masked prompt for the provider id.
+    expect(await handleInteractiveCommand("/provider openrouter", options)).toBe(true);
+    expect(prompted).toBe("openrouter");
+    expect(runtime.manager.provider).toBe("fake");
+    expect(errors).toEqual([]);
+    expect(cancelled).toBe(0);
   });
 
   test("/model switches the manager and sidekick model at runtime", async () => {    const { workspace, config } = await fixture();

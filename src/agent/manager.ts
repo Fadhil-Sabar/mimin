@@ -108,6 +108,8 @@ export interface RunManagerOptions extends CreateManagerToolsOptions {
   run?: ManagerRunFunction;
   systemPrompt?: string;
   runConfig?: Omit<AgentRunConfig, "thinking">;
+  /** Provider API key resolved from auth.json by the CLI layer (env wins). */
+  authKey?: string;
   signal?: AbortSignal;
   onEvent?: AgentEventCallback;
   now?: () => number;
@@ -163,7 +165,7 @@ export async function runManager(
     }),
     config: {
       ...options.runConfig,
-      ...commandCodeCredentials(options.config.manager.provider),
+      ...commandCodeCredentials(options.config.manager.provider, process.env, options.authKey),
       thinking: options.config.manager.thinking,
     },
     stream: options.stream,

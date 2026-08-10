@@ -92,6 +92,8 @@ export interface RunSidekickOptions {
   run?: SidekickRunFunction;
   systemPrompt?: string;
   runConfig?: Omit<AgentRunConfig, "thinking">;
+  /** Provider API key resolved from auth.json by the CLI layer (env wins). */
+  authKey?: string;
   signal?: AbortSignal;
   onActivity?: SidekickActivityCallback;
   now?: () => number;
@@ -322,7 +324,7 @@ export async function runSidekick(
       tools: createSidekickTools(options.workspace),
       config: {
         ...options.runConfig,
-        ...commandCodeCredentials(options.config.provider),
+        ...commandCodeCredentials(options.config.provider, process.env, options.authKey),
         thinking: options.config.thinking,
       },
       signal: options.signal,

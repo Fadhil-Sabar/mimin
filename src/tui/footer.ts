@@ -47,6 +47,9 @@ export interface FooterOptions {
   onSubmit?: (line: string) => void | Promise<void>;
   onCancel?: () => void | Promise<void>;
   onSubmitError?: (error: unknown) => void;
+  /** Enter submits a masked API key; Escape cancels the key prompt. */
+  onSubmitKey?: (provider: string, key: string) => void | Promise<void>;
+  onCancelKey?: () => void;
   requestRender?: () => void;
 }
 
@@ -206,9 +209,16 @@ export class Footer implements Component, Focusable {
   private timer?: Timer;
   private handleEscape: (data: string) => void;
   private readonly optionsRequestRender?: () => void;
+  private readonly optionsOnSubmitKey?: (provider: string, key: string) => void | Promise<void>;
+  private readonly optionsOnCancelKey?: () => void;
+  private readonly optionsOnSubmitError?: (error: unknown) => void;
+  private keyPrompt: { provider: string; buffer: string } | undefined;
 
   constructor(options: FooterOptions) {
     this.optionsRequestRender = options.requestRender;
+    this.optionsOnSubmitKey = options.onSubmitKey;
+    this.optionsOnCancelKey = options.onCancelKey;
+    this.optionsOnSubmitError = options.onSubmitError;
     this.model = sanitizeText(options.managerModel, false) || "unknown";
     this.thinking = sanitizeText(options.thinking ?? "off", false) || "off";
     this.context = options.context;
@@ -309,7 +319,63 @@ export class Footer implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    if (this.keyPrompt) {
+      this.handleKeyInput(data);
+      return;
+    }
     this.handleEscape(data);
+  }
+
+  /** Begin a masked API-key prompt for a provider. */
+  beginKeyPrompt(provider: string): void {
+    this.keyPrompt = { provider, buffer: "" };
+    this.refresh();
+    this.optionsRequestRender?.();
+  }
+
+  /** Whether a masked key prompt is active. */
+  get promptingForKey(): boolean {
+    return this.keyPrompt !== undefined;
+  }
+
+  /** Cancel the active key prompt (Escape). */
+  cancelKeyPrompt(): void {
+    this.keyPrompt = undefined;
+    this.refresh();
+    this.optionsRequestRender?.();
+  }
+
+  private handleKeyInput(data: string): void {
+    if (!this.keyPrompt) return;
+    if (data === "\r" || data === "\n") {
+      const { provider, buffer } = this.keyPrompt;
+      this.keyPrompt = undefined;
+      this.refresh();
+      this.optionsRequestRender?.();
+      void Promise.resolve(this.optionsOnSubmitKey?.(provider, buffer))
+        .catch((error: unknown) => this.optionsOnSubmitError?.(error))
+        .finally(() => this.optionsRequestRender?.());
+      return;
+    }
+    if (matchesKey(data, Key.escape)) {
+      this.keyPrompt = undefined;
+      this.refresh();
+      this.optionsRequestRender?.();
+      this.optionsOnCancelKey?.();
+      return;
+    }
+    if (data === "\u007f" || data === "\b") {
+      this.keyPrompt = { ...this.keyPrompt, buffer: this.keyPrompt.buffer.slice(0, -1) };
+      this.refresh();
+      this.optionsRequestRender?.();
+      return;
+    }
+    // Only printable characters are accepted; control sequences are ignored.
+    if (data.length === 1 && data.charCodeAt(0) >= 32 && data.charCodeAt(0) < 127) {
+      this.keyPrompt = { ...this.keyPrompt, buffer: this.keyPrompt.buffer + data };
+      this.refresh();
+      this.optionsRequestRender?.();
+    }
   }
 
   invalidate(): void {
@@ -321,6 +387,13 @@ export class Footer implements Component, Focusable {
   render(width: number): string[] {
     if (width <= 0) return ["", ""];
     const rule = width > 0 ? dim("─".repeat(Math.max(1, width))) : "";
+    if (this.keyPrompt) {
+      const mask = "•".repeat(this.keyPrompt.buffer.length);
+      return [
+        rule,
+        `${yellow("Enter API key")} ${cyan(this.keyPrompt.provider)} ${dim("(Enter saves · Esc cancels)")}: ${mask}`,
+      ];
+    }
     return [
       rule,
       ...this.status.render(width),

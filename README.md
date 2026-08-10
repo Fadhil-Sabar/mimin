@@ -14,11 +14,11 @@ export ANTHROPIC_API_KEY='...'
 bun run start
 ```
 
-Edit the copied config to select installed pi-ai provider/model IDs for both roles. The example contains no credential and is not an active project config. Common API-key variables include `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `OPENROUTER_API_KEY`. pi-ai also honors provider-native ambient credentials where supported, such as AWS credentials/profiles for Bedrock and Google Application Default Credentials. mimin does not store provider credentials.
+Edit the copied config to select installed pi-ai provider/model IDs for both roles. The example contains no credential and is not an active project config. Common API-key variables include `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, and `OPENROUTER_API_KEY`. pi-ai also honors provider-native ambient credentials where supported, such as AWS credentials/profiles for Bedrock and Google Application Default Credentials. mimin stores keys only in `auth.json` (via `/provider`) when you opt in; environment variables take precedence.
 
 ### Command Code (custom provider)
 
-[Command Code](https://commandcode.ai) exposes an OpenAI-compatible API, and mimin resolves its models at runtime instead of requiring pi-ai's built-in registry. Configure it by setting the provider id `commandcode` for either role. The API key is read from `COMMANDCODE_API_KEY` only — never store the key in config.
+[Command Code](https://commandcode.ai) exposes an OpenAI-compatible API, and mimin resolves its models at runtime instead of requiring pi-ai's built-in registry. Configure it by setting the provider id `commandcode` for either role. The API key is read from `COMMANDCODE_API_KEY` (or `~/.mimin/data/auth.json` if set via `/provider commandcode`) — never store the key in config.
 
 ```sh
 # discover your model IDs (the /models endpoint is public and unauthenticated)
@@ -126,7 +126,18 @@ Lists every known provider with a credential hint and whether credentials appear
 - Filtering is case-insensitive and matches anywhere in the id, consistent with `/model`.
 - Credential detection only checks whether the expected source appears available — it never reads or displays credential values.
 
-`/provider` is informational only: it never switches a role's provider or model, and it cannot configure secrets. Providers and models are configured in `config.json`; use `/model <role>` to switch a role's model for the current session. Set the listed environment variable and restart mimin to enable a provider.
+`/provider` is informational only: it never switches a role's provider or model. Providers and models are configured in `config.json`; use `/model <role>` to switch a role's model for the current session.
+
+##### Setting up a provider key
+
+Run `/provider <provider-id>` (e.g. `/provider commandcode`) to set up that provider's API key interactively. When the provider is not configured, mimin shows a **masked input prompt** (keys are echoed as `•` and never appear in the editor, history, transcript, or session). Press Enter to save, Escape to cancel.
+
+- Saved keys are written to `<dataDir>/auth.json` as plaintext with `chmod 600` (owner-only read/write) — the same convention many CLI tools use.
+- Environment variables always win over stored keys, so an existing `COMMANDCODE_API_KEY` export (or any provider's documented env var) takes precedence.
+- Built-in pi-ai providers continue to use their env vars or native auth; the interactive prompt is a fallback for providers that need a key.
+- Keys are never logged, rendered, or returned — `/provider` only reports `configured` / `not configured`.
+
+Secrets cannot be configured through `config.json`; use the `/provider` key prompt or environment variables.
 
 #### `/session`
 
@@ -187,7 +198,10 @@ sessions/manager/*.jsonl
 sessions/sidekick/*.jsonl
 memory/user.jsonl
 memory/projects/*.jsonl
+auth.json
 ```
+
+`auth.json` holds API keys entered via `/provider` (chmod 600; environment variables take precedence).
 
 Manager conversations can be continued, and each complete sidekick history remains isolated for provider-safe continuation. Reasoning and tool logs stay inside their role-scoped histories and are excluded from delegation results, the TUI, and `session_search`. Project memory filenames derive from the canonical workspace path.
 

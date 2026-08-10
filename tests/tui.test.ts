@@ -1135,6 +1135,45 @@ describe("lightweight pi-tui areas", () => {
     expect(menu).toContain("/provider");
   });
 
+  test("footer masked key prompt never leaks the key into the editor or render", async () => {
+    let submitted: { provider: string; key: string } | undefined;
+    let cancelled = 0;
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      workspace: "/repo/project",
+      onSubmitKey: (provider, key) => { submitted = { provider, key }; },
+      onCancelKey: () => { cancelled += 1; },
+    });
+    // Enter key-prompt mode.
+    footer.beginKeyPrompt("openrouter");
+    expect(footer.promptingForKey).toBe(true);
+    // Render shows a masked prompt, no key text.
+    let rendered = textOf(footer.render(80));
+    expect(rendered).toContain("openrouter");
+    expect(rendered).toContain("Enter API key");
+    // Type a secret: it renders as bullets, never the plaintext.
+    for (const ch of "sk-secret-12345") {
+      footer.handleInput(ch);
+    }
+    rendered = textOf(footer.render(80));
+    expect(rendered).not.toContain("sk-secret-12345");
+    expect(rendered).toContain("•".repeat("sk-secret-12345".length));
+    // The editor buffer stays empty — the key never enters it.
+    expect(footer.editor.getText()).toBe("");
+    // Enter submits the key.
+    footer.handleInput("\r");
+    expect(submitted).toEqual({ provider: "openrouter", key: "sk-secret-12345" });
+    expect(footer.promptingForKey).toBe(false);
+    expect(cancelled).toBe(0);
+
+    // Escape cancels a fresh prompt.
+    footer.beginKeyPrompt("openai");
+    footer.handleInput("partial");
+    footer.handleInput("\u001b");
+    expect(footer.promptingForKey).toBe(false);
+    expect(cancelled).toBe(1);
+  });
+
   test("/session dropdown lists sessions and arrow+Tab applies the id", async () => {
     const footer = new Footer({
       managerModel: "gpt-5.5",

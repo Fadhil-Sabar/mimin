@@ -55,6 +55,9 @@ export interface AgentTuiOptions {
   onCancel?: () => void | Promise<void>;
   onExit?: () => void | Promise<void>;
   onToggleSidekick?: (identifier: number | string) => void;
+  /** Enter submits a masked API key; Escape cancels the key prompt. */
+  onSubmitKey?: (provider: string, key: string) => void | Promise<void>;
+  onCancelKey?: () => void;
   terminal?: Terminal;
   /** Test seam. When supplied, no ProcessTerminal is constructed. */
   tui?: TuiHost;
@@ -91,6 +94,10 @@ export class AgentTui {
   readonly sidekicks: SidekickActivity;
   readonly tools: ToolActivity;
   readonly footer: Footer;
+  /** Begin a masked API-key prompt for a provider (renders in the footer). */
+  promptForKey: (provider: string) => void;
+  /** Cancel the active masked key prompt. */
+  cancelKeyPrompt: () => void;
 
   private activeManagerStream?: string;
   /** Transcript entry id for each turn's inline tool block. */
@@ -130,11 +137,22 @@ export class AgentTui {
         await options.onSubmit?.(line);
       },
       onCancel: options.onCancel,
+      onSubmitKey: options.onSubmitKey,
+      onCancelKey: options.onCancelKey,
       onSubmitError: (error) => this.addError(
         error instanceof Error ? error.message : String(error),
       ),
       requestRender: () => this.requestRender(),
     });
+    // Key prompts render through the footer; expose a programmatic trigger.
+    this.promptForKey = (provider) => {
+      this.footer.beginKeyPrompt(provider);
+      this.requestRender();
+    };
+    this.cancelKeyPrompt = () => {
+      this.footer.cancelKeyPrompt();
+      this.requestRender();
+    };
 
     // Four top-level areas: header, transcript, sidekick cards, footer.
     // Manager tool calls render inline inside the transcript as blocks.

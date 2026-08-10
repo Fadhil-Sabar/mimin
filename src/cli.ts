@@ -6,6 +6,8 @@ import { AgentRuntime } from "./agent/runtime.js";
 import type { AgentEvent } from "./agent/types.js";
 import type { AgentConfig } from "./config.js";
 import { ConfigValidationError, loadConfig } from "./config.js";
+import { AuthStore } from "./auth.js";
+import { COMMANDCODE_API_KEY_ENV_VAR, isCommandCodeProvider } from "./agent/commandcode.js";
 import { MemoryStore } from "./memory/store.js";
 import { autoMemoryEnabled, learnFromTurn } from "./memory/auto.js";
 import { MemoryLearner } from "./memory/learner.js";
@@ -21,6 +23,7 @@ import { suggestModels } from "./tui/model-suggestions.js";
 import type { LocalDelegateEvent } from "./tui/sidekick.js";
 import { sanitizeText } from "./tui/header.js";
 import { suggestProviders } from "./tui/provider-suggestions.js";
+import { credentialAvailable } from "./tui/provider-suggestions.js";
 import type { ProviderSuggestionSource } from "./tui/provider-suggestions.js";
 
 export const CLI_VERSION = "0.2.0";
@@ -56,6 +59,10 @@ export interface CliTui {
   setRunning(running: boolean): void;
   /** Clear the editor's draft input (idle Escape). */
   clearInput(): void;
+  /** Begin a masked API-key prompt for a provider. */
+  promptForKey(provider: string): void;
+  /** Cancel the active masked key prompt. */
+  cancelKeyPrompt(): void;
   /** Clear the transcript and replay a restored session's history. */
   restoreSession(entries: { role: "user" | "manager"; text: string }[]): void;
 }
@@ -73,6 +80,8 @@ export interface CliDependencies {
   suggestModels?: ModelSuggestionSource;
   /** Injectable provider suggestions for /provider (defaults to pi-ai + Command Code). */
   suggestProviders?: ProviderSuggestionSource;
+  /** Injectable credential store; defaults to AuthStore at <dataDir>/auth.json. */
+  createAuthStore?: (config: AgentConfig) => AuthStore;
 }
 
 export interface InteractiveCommandOptions {
@@ -87,6 +96,12 @@ export interface InteractiveCommandOptions {
   suggestModels?: ModelSuggestionSource;
   /** Injectable provider suggestions for /provider; defaults to pi-ai + Command Code. */
   suggestProviders?: ProviderSuggestionSource;
+  /** Credential store for /provider key setup (auth.json). */
+  auth?: AuthStore;
+  /** Begin a masked API-key prompt (TUI only). */
+  promptForKey?(provider: string): void;
+  /** Cancel the active masked key prompt. */
+  cancelKeyPrompt?(): void;
   /** Restore a previous manager session: load its history and switch to it. */
   restoreSession?(sessionId: string): Promise<string | undefined>;
 }
@@ -186,10 +201,10 @@ function modelRole(value: string | undefined): ModelRole | undefined {
 }
 
 /**
- * Show every known provider with credential hints and availability, plus the
- * role providers currently configured (for reference only — /provider never
- * switches a role, it only informs). An optional query filters the list to
- * matching provider ids (the dropdown's Tab-apply produces one).
+ * Show every known provider with credential hints and availability. An exact
+ * provider id triggers the interactive key-setup flow (masked input persisted
+ * to auth.json); anything else filters the list. /provider never switches a
+ * role's provider or model.
  */
 async function handleProviderCommand(
   query: string | undefined,
@@ -197,6 +212,35 @@ async function handleProviderCommand(
 ): Promise<void> {
   const providerSource = options.suggestProviders ?? suggestProviders;
   const providers = await providerSource();
+  const exact = query ? providers.find((item) => item.id === query) : undefined;
+
+  // Exact provider id: offer key setup when not configured.
+  if (exact) {
+    const configured = await isProviderConfigured(exact.id, options.auth);
+    if (configured) {
+      options.showInfo(`Provider ${exact.id} is configured. Credentials come from the environment or auth.json.`);
+      return;
+    }
+    if (!options.auth) {
+      options.showInfo(
+        `Provider ${exact.id} is not configured. Set its environment variable (see /provider) and restart mimin.`,
+      );
+      return;
+    }
+    if (!options.promptForKey) {
+      // No interactive TUI (e.g. direct mode): cannot prompt for a key.
+      options.showInfo(
+        `Provider ${exact.id} is not configured. Set its environment variable and restart mimin.`,
+      );
+      return;
+    }
+    // Register the pending key write, then show the masked prompt.
+    pendingKeyProvider = exact.id;
+    options.showInfo(`Enter the API key for ${exact.id} (masked input):`);
+    options.promptForKey(exact.id);
+    return;
+  }
+
   const filtered = query
     ? providers.filter((item) => item.id.toLowerCase().includes(query.toLowerCase()))
     : providers;
@@ -211,10 +255,43 @@ async function handleProviderCommand(
     "",
     `Configured in config.json: manager ${roleLabel(options.runtime.manager)} · ` +
       `sidekick ${roleLabel(options.runtime.sidekick)}`,
-    "Credentials come from the environment (or native provider auth); " +
-      "set the listed env var and restart mimin. /provider never stores or " +
-      "switches credentials — use /model <role> to pick a role's model.",
+    "Credentials come from the environment, native provider auth, or auth.json. " +
+      "Run /provider <provider-id> to set up a key; use /model <role> to pick a role's model.",
   ].join("\n"));
+}
+
+/** The provider id whose key prompt is currently pending (masked input). */
+let pendingKeyProvider: string | undefined;
+
+/** Whether a provider has usable credentials (env or auth.json). */
+async function isProviderConfigured(
+  provider: string,
+  auth?: AuthStore,
+): Promise<boolean> {
+  if (isCommandCodeProvider(provider)) {
+    const envKey = process.env[COMMANDCODE_API_KEY_ENV_VAR];
+    if (typeof envKey === "string" && envKey.trim().length > 0) return true;
+    if (auth) {
+      try {
+        return await auth.hasKey(provider);
+      } catch {
+        return false;
+      }
+    }
+    return false;
+  }
+  // Built-in providers: their own env var or native auth (pi-ai detection).
+  const known = credentialAvailableForProvider(provider);
+  return known;
+}
+
+/** Resolve whether a built-in provider appears configured (env/native). */
+function credentialAvailableForProvider(provider: string): boolean {
+  try {
+    return credentialAvailable(provider);
+  } catch {
+    return false;
+  }
 }
 
 /** Switch the manager or sidekick model at runtime (interactive only). */
@@ -367,6 +444,7 @@ async function runDirect(
   store: SessionStore,
   io: CliIo,
   manager: (options: RunManagerOptions) => Promise<ManagerResult>,
+  auth?: AuthStore,
 ): Promise<number> {
   const sessionId = parsed.continue ? await newestManagerSession(store) : undefined;
   if (parsed.continue && !sessionId) {
@@ -380,12 +458,21 @@ async function runDirect(
   const interrupt = (): void => controller.abort();
   process.once("SIGINT", interrupt);
   try {
+    let authKey: string | undefined;
+    if (auth) {
+      try {
+        authKey = await auth.effectiveKey(config.manager.provider, COMMANDCODE_API_KEY_ENV_VAR);
+      } catch {
+        authKey = undefined;
+      }
+    }
     const result = await manager({
       input: parsed.task,
       workspace,
       config,
       sessionStore: store,
       ...(sessionId ? { sessionId } : {}),
+      ...(authKey ? { authKey } : {}),
       signal: controller.signal,
       onEvent: (event) => {
         if (event.type === "model_event" && event.event.type === "text_delta") {
@@ -435,7 +522,9 @@ async function runInteractive(
   io: CliIo,
   suggestModelsSource?: ModelSuggestionSource,
   suggestProvidersSource?: ProviderSuggestionSource,
+  auth?: AuthStore,
 ): Promise<number> {
+  const providers = suggestProvidersSource ?? suggestProviders;
   let sessionId = shouldContinue ? await newestManagerSession(store) : undefined;
   if (shouldContinue && !sessionId) {
     io.stderr("No manager session is available to continue. Run mimin first.\n");
@@ -465,6 +554,7 @@ async function runInteractive(
     workspace,
     thinking: config.manager.thinking,
     roleProviders: (role) => runtime[role].provider,
+    suggestProviders: providers,
     sessionSource: sessionSuggestionsFromStore(store),
     onExit: () => finish(0),
     onCancel: () => {
@@ -475,6 +565,22 @@ async function runInteractive(
       }
       // Idle: Escape clears the draft input.
       app?.clearInput();
+    },
+    onSubmitKey: async (provider, key) => {
+      if (!auth || pendingKeyProvider !== provider) return;
+      pendingKeyProvider = undefined;
+      try {
+        await auth.setKey(provider, key);
+        app?.addInfo(`Saved API key for ${provider} to auth.json (never shown again).`);
+      } catch (error) {
+        app?.addError(`Could not save key for ${provider}: ${terminalText(error instanceof Error ? error.message : error, 500)}`);
+      }
+    },
+    onCancelKey: () => {
+      if (pendingKeyProvider) {
+        app?.addInfo(`Key entry for ${pendingKeyProvider} cancelled.`);
+        pendingKeyProvider = undefined;
+      }
     },
     onSubmit: async (line) => {
       if (await handleInteractiveCommand(line, {
@@ -489,7 +595,10 @@ async function runInteractive(
           });
         },
         suggestModels: suggestModelsSource,
-        suggestProviders: suggestProvidersSource,
+        suggestProviders: providers,
+        auth,
+        promptForKey: (provider) => app?.promptForKey(provider),
+        cancelKeyPrompt: () => app?.cancelKeyPrompt(),
         restoreSession: async (id) => {
           try {
             const session = await store.loadSession("manager", id);
@@ -525,12 +634,24 @@ async function runInteractive(
       let receivedManagerText = false;
       let completed = false;
       try {
+        let authKey: string | undefined;
+        if (auth) {
+          try {
+            authKey = await auth.effectiveKey(
+              runtime.manager.provider,
+              COMMANDCODE_API_KEY_ENV_VAR,
+            );
+          } catch {
+            authKey = undefined;
+          }
+        }
         const result = await manager({
           input: line,
           workspace,
           config: runtime.toConfig(),
           sessionStore: store,
           sessionId,
+          ...(authKey ? { authKey } : {}),
           signal: controller.signal,
           onEvent: (event: AgentEvent) => {
             app?.handleManagerEvent(event);
@@ -632,9 +753,10 @@ export async function runCli(
     root: join(config.dataDir, "sessions"),
   });
   const manager = dependencies.runManager ?? runManager;
+  const auth = (await dependencies.createAuthStore?.(config)) ?? new AuthStore({ dataDir: config.dataDir });
 
   if (parsed.mode === "direct") {
-    return runDirect(parsed, config, workspace, store, io, manager);
+    return runDirect(parsed, config, workspace, store, io, manager, auth);
   }
   const memory = dependencies.createMemoryStore?.(config, workspace) ?? new MemoryStore({
     dataDir: config.dataDir,
@@ -652,6 +774,7 @@ export async function runCli(
       io,
       dependencies.suggestModels,
       dependencies.suggestProviders,
+      auth,
     );
   } catch (error) {
     io.stderr(`Could not start interactive mode: ${terminalText(error instanceof Error ? error.message : error, 2_000)}\n`);
