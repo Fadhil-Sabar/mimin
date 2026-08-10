@@ -124,6 +124,9 @@ export class AgentTui {
       thinking: options.thinking,
     });
     this.transcript = new Transcript();
+    // Re-bind the transcript to the viewport before every render (the TUI
+    // renders the transcript child directly, so this is the reliable hook).
+    this.transcript.onBeforeRender = (width) => this.syncTranscriptHeight(width);
     this.sidekicks = new SidekickActivity(options.workspace);
     this.tools = new ToolActivity();
     this.footer = new Footer({
@@ -200,7 +203,10 @@ export class AgentTui {
       if (this.runState === "idle") return;
       this.header.invalidate();
       this.sidekicks.invalidate();
-      this.requestRender(true);
+      // Non-forced: the TUI diffs the invalidated components. A forced render
+      // would clear the screen and reset the viewport every second, yanking
+      // the user's scroll position while a response streams.
+      this.requestRender();
     }, TICK_INTERVAL_MS);
     this.tui.start();
   }
@@ -216,6 +222,9 @@ export class AgentTui {
   }
 
   requestRender(force = false): void {
+    // Bound the transcript before the TUI renders its children directly
+    // (the TUI calls each child's render(width), not the app's compose).
+    this.syncTranscriptHeight(80);
     this.tui.requestRender(force);
   }
 

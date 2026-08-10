@@ -48,9 +48,12 @@ class FakeTui implements TuiHost {
     this.stops += 1;
   }
 
-  requestRender(): void {
+  requestRender(force?: boolean): void {
     this.renders += 1;
+    if (force) this.forcedRenders += 1;
   }
+
+  forcedRenders = 0;
 }
 
 function expectWidth(lines: string[], width: number): void {
@@ -758,6 +761,25 @@ describe("lightweight pi-tui areas", () => {
     const view = app.render(80);
     // Tail-anchored again: the newest content is visible.
     expect(view.join("\n")).toContain("fresh tail");
+  });
+
+  test("the live tick timer never forces a full redraw (viewport must hold during streaming)", async () => {
+    const host = new FakeTui();
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: host,
+    });
+    app.start();
+    // A run is active: the tick timer invalidates and re-renders each second.
+    app.handleManagerEvent({ type: "model_event", event: { type: "text_start" } });
+    const before = host.forcedRenders;
+    // Tick: wait for the interval to fire.
+    await Bun.sleep(1_100);
+    const during = host.forcedRenders;
+    app.stop();
+    // The tick must not force full redraws (force resets pi-tui's viewport).
+    expect(during).toBe(before);
   });
 
   test("header run state and turn chip; footer spinner while working", () => {

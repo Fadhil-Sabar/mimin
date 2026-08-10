@@ -107,6 +107,8 @@ export class Transcript extends Container implements Component {
   private tailAnchored = true;
   private maxLines = TRANSCRIPT_MAX_LINES;
   private maxEntries = TRANSCRIPT_MAX_ENTRIES;
+  /** Called before each render; lets the owner re-bound maxLines to the viewport. */
+  onBeforeRender: ((width: number) => void) | undefined;
 
   constructor(maxLines = TRANSCRIPT_MAX_LINES) {
     super();
@@ -259,6 +261,7 @@ export class Transcript extends Container implements Component {
 
   render(width: number): string[] {
     if (width <= 0) return this.records.length > 0 ? [""] : [];
+    this.onBeforeRender?.(width);
     this.syncRows(width);
     const available = Math.max(0, this.maxLines - STATUS_ROWS);
     const totalVisible = Math.min(this.total, available);
