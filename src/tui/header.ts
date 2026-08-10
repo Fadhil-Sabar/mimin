@@ -6,6 +6,8 @@ export function sanitizeText(value: unknown, multiline = true): string {
   if (typeof value !== "string") return "";
   let text = value
     .replace(/\r\n?/g, "\n")
+    // ANSI SGR and CSI sequences; raw tool/provider errors can carry color.
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
     .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "")
     .replace(/\t/g, " ");
   if (!multiline) text = text.replace(/\n+/g, " ");

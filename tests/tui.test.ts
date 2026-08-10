@@ -339,9 +339,9 @@ describe("lightweight pi-tui areas", () => {
 
     const rows = textOf(app.tools.render(80));
     // Title-case aligned labels, path from tool_start args, no debug text.
-    expect(rows).toContain("Read    src/app.ts");
-    expect(rows).toContain("Edit    ");
-    expect(rows).toContain("✗ oldText was not found");
+    expect(rows).toContain("✓ Read    src/app.ts");
+    expect(rows).toContain("✕ Edit");
+    expect(rows).toContain("oldText was not found");
     expect(rows).not.toContain("(turn");
     expect(rows).not.toContain("[ok]");
     expect(rows).not.toContain("[error]");
@@ -373,8 +373,8 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.tools.render(80));
-    expect(rows).toContain("Bash    bun test");
-    expect(rows).toContain("Edit    src/cli.ts");
+    expect(rows).toContain("● Bash    bun test");
+    expect(rows).toContain("● Edit    src/cli.ts");
     expect(rows).toContain("…");
   });
 
@@ -402,6 +402,202 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     expect(app.tools.render(80)).toEqual([]);
+  });
+
+  test("tool rows show pending/running/completed/failed states", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    // Read: running, then completed.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
+    });
+    expect(textOf(app.tools.render(80))).toContain("● Read    a.ts");
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
+    });
+    expect(textOf(app.tools.render(80))).toContain("✓ Read    a.ts");
+    // Edit: fails.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "edit", arguments: { path: "b.ts" } } },
+    });
+    expect(textOf(app.tools.render(80))).toContain("● Edit    b.ts");
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "edit" }, result: { isError: true, text: "boom" } },
+    });
+    const rows = textOf(app.tools.render(80));
+    expect(rows).toContain("✕ Edit    b.ts");
+    expect(rows).toContain("boom");
+  });
+
+  test("tool errors drop the redundant tool-name prefix and stay compact", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "src" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: {
+        type: "tool_end",
+        turn: 1,
+        toolCall: { name: "read" },
+        result: { isError: true, text: 'Tool "read" failed: Path "src" is not a regular file' },
+      },
+    });
+    const rows = textOf(app.tools.render(80));
+    // The name is already in the label column; the prefix is stripped.
+    expect(rows).toContain("✕ Read    src");
+    expect(rows).not.toContain('Tool "read" failed:');
+    expect(rows).toContain('Path "src" is not a regular file');
+  });
+
+  test("tool error text is sanitized and truncated", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "bash" } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: {
+        type: "tool_end",
+        turn: 1,
+        toolCall: { name: "bash" },
+        result: {
+          isError: true,
+          text: "\u001b[31mTool \"bash\" failed: ENOENT: no such file " + "x".repeat(200),
+        },
+      },
+    });
+    const rows = textOf(app.tools.render(80));
+    expect(rows).toContain("✕ Bash");
+    expect(rows).toContain("ENOENT: no such file");
+    expect(rows).not.toContain("\u001b[31m");
+    // The error sub-line is compact: "· " marker plus a 60-char error cap.
+    const errorLine = rows.split("\n").find((line) => line.trimStart().startsWith("·")) ?? "";
+    expect(errorLine.length).toBeLessThanOrEqual(64);
+    const errorText = errorLine.slice(errorLine.indexOf("ENOENT"));
+    expect(errorText.length).toBeLessThanOrEqual(60);
+  });
+
+  test("running tool row is updated in place, no duplicate on completion", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
+    });
+    const rows = textOf(app.tools.render(80));
+    // Exactly one row, now completed; no second "running" copy survives.
+    expect(rows.match(/Read/g)).toHaveLength(1);
+    expect(rows).toContain("✓ Read    a.ts");
+    expect(rows).not.toContain("● Read");
+  });
+
+  test("bash rows show only the whitelisted command, never raw output", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "bash", arguments: { command: "bun test" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: {
+        type: "tool_end",
+        turn: 1,
+        toolCall: { name: "bash" },
+        result: {
+          isError: false,
+          text: "13 pass\n0 fail\n[stdout] 4.2s",
+          details: { command: "bun test" },
+        },
+      },
+    });
+    const rows = textOf(app.tools.render(80));
+    expect(rows).toContain("✓ Bash    bun test");
+    expect(rows).not.toContain("13 pass");
+    expect(rows).not.toContain("stdout");
+  });
+
+  test("verification rows gain a safe summary from whitelisted details", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "verification", arguments: { action: "test" } } },
+    });
+    expect(textOf(app.tools.render(80))).toContain("● Verify");
+    app.handleManagerEvent({
+      type: "model_event",
+      event: {
+        type: "tool_end",
+        turn: 1,
+        toolCall: { name: "verification" },
+        result: {
+          isError: false,
+          text: '{"action":"test","ok":true,"results":[{"command":"bun test","exitCode":0,"ok":true}]}',
+          details: {
+            action: "test",
+            ok: true,
+            results: [
+              { command: "bun test", exitCode: 0, ok: true, stdout: "81 tests passed\n", stderr: "" },
+            ],
+          },
+        },
+      },
+    });
+    const rows = textOf(app.tools.render(80));
+    expect(rows).toContain("✓ Verify  bun test");
+    expect(rows).toContain("passed");
+    // No raw output from the details leaks into the row.
+    expect(rows).not.toContain("81 tests passed");
+    expect(rows).not.toContain("stdout");
+  });
+
+  test("tool rows truncate at narrow widths", () => {
+    const app = createApp({
+      managerModel: "test-model",
+      workspace: "/repo/project",
+      tui: new FakeTui(),
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "bash", arguments: { command: "bun test --coverage --verbose" } } },
+    });
+    const wide = app.tools.render(80);
+    expect(textOf(wide)).toContain("bun test --coverage");
+    expectWidth(wide, 80);
+    const narrow = app.tools.render(10);
+    expectWidth(narrow, 10);
   });
 
   test("sidekick cards show model, task, status, elapsed, and summary; hide UUIDs", () => {

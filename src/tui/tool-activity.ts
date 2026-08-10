@@ -17,13 +17,17 @@ export interface LocalToolEvent {
   };
 }
 
+type ToolStatus = "pending" | "running" | "ok" | "failed";
+
 interface ToolRow {
   name: string;
-  status: "running" | "ok" | "failed";
+  status: ToolStatus;
   /** Safe detail parsed from tool_start arguments (path/command). */
   detail?: string;
-  /** Error summary appended on failure. */
+  /** Compact error message shown on failure (name stripped, sanitized). */
   error?: string;
+  /** Short safe summary for verification successes (e.g. "81 tests passed"). */
+  summary?: string;
 }
 
 /** Tools represented by sidekick cards; their rows are suppressed. */
@@ -41,6 +45,9 @@ const LABELS: Record<string, string> = {
 };
 
 const LABEL_WIDTH = 7;
+
+/** Strip a `Tool "name" failed:`-style prefix, the name is already shown. */
+const ERROR_PREFIX = /^Tool\s+"[^"]*"\s+failed:\s*/;
 
 function nameOf(value: unknown): string {
   return sanitizeText(value, false).trim() || "tool";
@@ -67,7 +74,47 @@ function startDetail(name: string, args: unknown): string | undefined {
   if (name === "bash") {
     return compact(object.command, 60);
   }
+  if (name === "verification") {
+    return compact(VERIFY_COMMAND[object.action as string] ?? object.action, 60);
+  }
   return undefined;
+}
+
+/** Friendlier command label for the fixed verification actions. */
+const VERIFY_COMMAND: Record<string, string> = {
+  git_status: "git status",
+  git_diff: "git diff",
+  test: "bun test",
+  typecheck: "bun run typecheck",
+  build: "bun run build",
+  all: "test + typecheck + build",
+};
+
+/**
+ * Short safe verification summary built from the whitelisted result details:
+ * each command's ok flag and exit code. Only counts are shown, never output.
+ */
+function verificationSummary(details: unknown): string | undefined {
+  const object = record(details);
+  const results = object?.results;
+  if (!Array.isArray(results)) return undefined;
+  const entries = results.map(record).filter((entry) => entry !== undefined);
+  if (entries.length === 0) return undefined;
+  const passed = entries.filter((entry) => entry.ok === true).length;
+  const failed = entries.length - passed;
+  const ok = entries.every((entry) => entry.ok === true);
+  if (ok) return entries.length === 1 ? "passed" : `${passed} checks passed`;
+  return failed === entries.length
+    ? "failed"
+    : `${passed}/${entries.length} checks passed`;
+}
+
+function compactError(raw: unknown): string | undefined {
+  const text = sanitizeText(raw, false).trim();
+  if (!text) return undefined;
+  // "Tool "read" failed: Path "src" is not a regular file" -> "Path …"
+  const stripped = text.replace(ERROR_PREFIX, "");
+  return compact(stripped || text, 60);
 }
 
 function compact(value: unknown, limit: number): string {
@@ -76,10 +123,12 @@ function compact(value: unknown, limit: number): string {
 }
 
 /**
- * Compact tool rows for the manager run. Labels are title-case and aligned,
- * success shows only the parsed path/command (no debug text), failures append
- * a `✗` summary. Delegate is represented by its sidekick card, so its row is
- * suppressed. Raw stdout/transcripts never reach the UI.
+ * Compact tool rows for the manager run, styled as an activity stream:
+ * pending/running/completed/failed states with status glyphs, title-case
+ * labels in a stable column, dim completed routine work, a short error line
+ * under failed rows, and a safe one-line summary for verification successes.
+ * Raw stdout/transcripts never reach the UI. Delegate is represented by its
+ * sidekick card, so its row is suppressed.
  */
 export class ToolActivity implements Component {
   private readonly rows: ToolRow[] = [];
@@ -89,6 +138,7 @@ export class ToolActivity implements Component {
     const toolCall = record(event.toolCall);
     const name = nameOf(toolCall?.name);
     if (CARD_REPRESENTED.has(name)) return;
+
     if (type === "tool_start") {
       this.rows.push({
         name,
@@ -97,6 +147,7 @@ export class ToolActivity implements Component {
       });
       return;
     }
+
     if (type === "tool_end") {
       const row = this.rows
         .slice()
@@ -106,7 +157,11 @@ export class ToolActivity implements Component {
       const result = record(event.result);
       const isError = result?.isError === true;
       row.status = isError ? "failed" : "ok";
-      if (isError) row.error = compact(result?.text, 60);
+      if (isError) {
+        row.error = compactError(result?.text);
+      } else if (name === "verification") {
+        row.summary = verificationSummary(result?.details);
+      }
     }
   }
 
@@ -120,14 +175,35 @@ export class ToolActivity implements Component {
 
   render(width: number): string[] {
     if (width <= 0 || this.rows.length === 0) return [];
-    return this.rows.map((row) => {
+    return this.rows.flatMap((row) => {
       const label = labelOf(row.name).padEnd(LABEL_WIDTH);
+      const glyph = STATUS_GLYPHS[row.status];
+      const styledGlyph = row.status === "failed"
+        ? yellow(glyph)
+        : row.status === "ok"
+          ? green(glyph)
+          : cyan(glyph);
       const detail = row.detail ? ` ${dim(row.detail)}` : "";
-      const failure = row.status === "failed"
-        ? ` ${yellow(`✗ ${row.error ?? "failed"}`)}`
+      const suffix = row.status === "running" ? ` ${cyan("…")}` : "";
+      const summary = row.status === "ok" && row.summary
+        ? ` ${green(`· ${row.summary}`)}`
         : "";
-      const suffix = row.status === "running" ? cyan(" …") : "";
-      return truncateToWidth(`  ${label}${detail}${failure}${suffix}`, width);
+      const line = truncateToWidth(
+        ` ${styledGlyph} ${label}${detail}${suffix}${summary}`,
+        width,
+      );
+      if (row.status !== "failed" || !row.error) return [line];
+      // Failed rows get a quiet second line with the error, keeping the
+      // failure readable without dumping raw tool output into the stream.
+      const errorLine = truncateToWidth(`  ${dim("·")} ${yellow(row.error)}`, width);
+      return [line, errorLine];
     });
   }
 }
+
+const STATUS_GLYPHS: Record<ToolStatus, string> = {
+  pending: "○",
+  running: "●",
+  ok: "✓",
+  failed: "✕",
+};
