@@ -107,7 +107,7 @@ describe("CLI argument and noninteractive paths", () => {
       loadConfig: async () => { loads += 1; throw new Error("must not load"); },
     });
     expect(help).toBe(0);
-    expect(io.out).toContain("Usage: agent");
+    expect(io.out).toContain("Usage: mimin");
     expect(io.out).toContain("/memory add project");
     expect(loads).toBe(0);
 

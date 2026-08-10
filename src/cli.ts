@@ -83,15 +83,15 @@ export interface InteractiveCommandOptions {
   restoreSession?(sessionId: string): Promise<string | undefined>;
 }
 
-const USAGE = `Usage: agent [--continue] ["task"]
+const USAGE = `Usage: mimin [--continue] ["task"]
 
 Commands:
-  agent                    Start an interactive manager conversation
-  agent "task"             Run one manager task and stream the answer
-  agent --help             Show this help
-  agent --version          Show the version
-  agent --continue         Resume the newest manager session interactively
-  agent --continue "task"  Resume it for one direct task
+  mimin                    Start an interactive manager conversation
+  mimin "task"             Run one manager task and stream the answer
+  mimin --help             Show this help
+  mimin --version          Show the version
+  mimin --continue         Resume the newest manager session interactively
+  mimin --continue "task"  Resume it for one direct task
 
 Interactive commands:
   ${INTERACTIVE_COMMAND_NAMES.join("\n  ")}
@@ -325,7 +325,7 @@ async function runDirect(
 ): Promise<number> {
   const sessionId = parsed.continue ? await newestManagerSession(store) : undefined;
   if (parsed.continue && !sessionId) {
-    io.stderr("No manager session is available to continue. Run agent first.\n");
+    io.stderr("No manager session is available to continue. Run mimin first.\n");
     return 1;
   }
 
@@ -392,7 +392,7 @@ async function runInteractive(
 ): Promise<number> {
   let sessionId = shouldContinue ? await newestManagerSession(store) : undefined;
   if (shouldContinue && !sessionId) {
-    io.stderr("No manager session is available to continue. Run agent first.\n");
+    io.stderr("No manager session is available to continue. Run mimin first.\n");
     return 1;
   }
   if (!sessionId) sessionId = (await store.createSession("manager")).id;
@@ -534,7 +534,7 @@ export async function runCli(
   try {
     parsed = parseCliArgs(args);
   } catch (error) {
-    io.stderr(`${error instanceof Error ? error.message : String(error)}\nRun agent --help for usage.\n`);
+    io.stderr(`${error instanceof Error ? error.message : String(error)}\nRun mimin --help for usage.\n`);
     return 2;
   }
   if (parsed.mode === "help") {

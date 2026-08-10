@@ -6,7 +6,7 @@
   "type": "module",
   "module": "src/index.ts",
   "bin": {
-    "agent": "dist/index.js"
+    "mimin": "dist/index.js"
   },
   "scripts": {
     "start": "bun run src/index.ts",
@@ -14,7 +14,7 @@
     "test": "bun test",
     "typecheck": "tsc --noEmit",
     "build": "bun build src/index.ts --target bun --outfile dist/index.js --banner='#!/usr/bin/env bun'",
-    "compile": "bun build --compile src/index.ts --outfile dist/agent"
+    "compile": "bun build --compile src/index.ts --outfile dist/mimin"
   },
   "dependencies": {
     "@mariozechner/pi-ai": "^0.73.1",

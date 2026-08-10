@@ -33,7 +33,7 @@ export class ConfigValidationError extends Error {
   readonly issues: string[];
 
   constructor(issues: string[]) {
-    super(`Invalid agent configuration: ${issues.join("; ")}`);
+    super(`Invalid mimin configuration: ${issues.join("; ")}`);
     this.name = "ConfigValidationError";
     this.issues = issues;
   }

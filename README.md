@@ -66,12 +66,12 @@ The current working directory is always the workspace and determines project-mem
 ## Usage
 
 ```sh
-agent                         # new interactive conversation
-agent "implement the task"    # direct task; streams manager text and sidekick status
-agent --continue              # newest manager session, interactive
-agent --continue "next task"  # newest manager session, direct
-agent --help
-agent --version
+mimin                         # new interactive conversation
+mimin "implement the task"    # direct task; streams manager text and sidekick status
+mimin --continue              # newest manager session, interactive
+mimin --continue "next task"  # newest manager session, direct
+mimin --help
+mimin --version
 ```
 
 During an interactive run, Escape cancels the active manager request (including running sidekicks and their shell commands) and Ctrl-C exits cleanly. Only one manager turn runs at a time.
@@ -155,11 +155,11 @@ bun run build
 bun run compile
 ```
 
-`bun run build` creates the Bun-targeted package entry at `dist/index.js`. `bun run compile` creates the standalone Bun executable at `dist/agent`:
+`bun run build` creates the Bun-targeted package entry at `dist/index.js`. `bun run compile` creates the standalone Bun executable at `dist/mimin`:
 
 ```sh
-./dist/agent --help
-./dist/agent "inspect this repository"
+./dist/mimin --help
+./dist/mimin "inspect this repository"
 ```
 
 `dist/` is generated and gitignored. The project uses the MIT license and adds no provider SDK beyond pi-ai's dependencies.
