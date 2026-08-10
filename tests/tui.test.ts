@@ -1055,9 +1055,9 @@ describe("lightweight pi-tui areas", () => {
       workspace: "/repo/project",
       roleProviders: () => "commandcode",
       suggestModels: async () => [
-        { id: "gpt-5.5", description: "200k ctx" },
-        { id: "deepseek/deepseek-v4-flash" },
-        { id: "google/gemini-3.5-flash" },
+        { provider: "commandcode", id: "gpt-5.5", description: "200k ctx" },
+        { provider: "commandcode", id: "deepseek/deepseek-v4-flash" },
+        { provider: "commandcode", id: "google/gemini-3.5-flash" },
       ],
     });
     // Typing "/model sidekick" triggers the role-aware model dropdown.
@@ -1071,12 +1071,13 @@ describe("lightweight pi-tui areas", () => {
     const menu = textOf(footer.editor.render(80));
     expect(menu).toContain("gpt-5.5");
     expect(menu).toContain("deepseek/deepseek-v4-flash");
-    // Arrow down selects the second model; Tab applies it, preserving the role.
+    // Arrow down selects the second model; Tab applies it, preserving the role
+    // and carrying the provider so selection is unambiguous.
     footer.editor.handleInput("\u001b[B");
     for (let i = 0; i < 10; i += 1) await Promise.resolve();
     footer.editor.handleInput("\t");
     for (let i = 0; i < 10; i += 1) await Promise.resolve();
-    expect(footer.editor.getText()).toBe("/model sidekick deepseek/deepseek-v4-flash");
+    expect(footer.editor.getText()).toBe("/model sidekick commandcode deepseek/deepseek-v4-flash");
   });
 
   test("/model manager dropdown uses the manager's provider and preserves the role", async () => {
@@ -1086,8 +1087,8 @@ describe("lightweight pi-tui areas", () => {
       roleProviders: (role) => (role === "manager" ? "anthropic" : "commandcode"),
       suggestModels: async (provider) =>
         provider === "anthropic"
-          ? [{ id: "claude-sonnet-4-6", description: "200k ctx" }]
-          : [{ id: "gpt-5.5" }],
+          ? [{ provider: "anthropic", id: "claude-sonnet-4-6", description: "200k ctx" }]
+          : [{ provider: "commandcode", id: "gpt-5.5" }],
     });
     footer.editor.setText("");
     for (const ch of "/model manager") {
@@ -1099,10 +1100,10 @@ describe("lightweight pi-tui areas", () => {
     const menu = textOf(footer.editor.render(80));
     expect(menu).toContain("claude-sonnet-4-6");
     expect(menu).not.toContain("gpt-5.5");
-    // Tab applies the model, preserving the manager role prefix.
+    // Tab applies the model, preserving the manager role prefix and provider.
     footer.editor.handleInput("\t");
     for (let i = 0; i < 10; i += 1) await Promise.resolve();
-    expect(footer.editor.getText()).toBe("/model manager claude-sonnet-4-6");
+    expect(footer.editor.getText()).toBe("/model manager anthropic claude-sonnet-4-6");
   });
 
   test("/model dropdown filters by any-position substring (sol finds gpt-5.6-sol)", async () => {    const footer = new Footer({
@@ -1110,9 +1111,9 @@ describe("lightweight pi-tui areas", () => {
       workspace: "/repo/project",
       roleProviders: () => "commandcode",
       suggestModels: async () => [
-        { id: "gpt-5.5", description: "200k ctx" },
-        { id: "gpt-5.6-sol", description: "1M ctx" },
-        { id: "deepseek/deepseek-v4-flash" },
+        { provider: "commandcode", id: "gpt-5.5", description: "200k ctx" },
+        { provider: "commandcode", id: "gpt-5.6-sol", description: "1M ctx" },
+        { provider: "commandcode", id: "deepseek/deepseek-v4-flash" },
       ],
     });
     footer.editor.setText("");

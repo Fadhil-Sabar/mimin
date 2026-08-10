@@ -65,3 +65,31 @@ export function credentialAvailable(
   const found = findEnvKeys(provider);
   return Array.isArray(found) && found.length > 0;
 }
+
+/**
+ * Provider suggestions with auth.json awareness. A provider configured only
+ * through a stored auth.json key (e.g. commandcode) counts as configured.
+ */
+export async function suggestProvidersWithAuth(
+  auth?: { hasKey(provider: string): Promise<boolean> },
+): Promise<ProviderSuggestion[]> {
+  const providers = [...getProviders(), COMMANDCODE_PROVIDER];
+  const result: ProviderSuggestion[] = [];
+  for (const provider of providers) {
+    const description = credentialLabel(provider);
+    let configured = credentialAvailable(provider);
+    if (!configured && auth && provider === COMMANDCODE_PROVIDER) {
+      try {
+        configured = await auth.hasKey(provider);
+      } catch {
+        configured = false;
+      }
+    }
+    result.push({
+      id: provider,
+      ...(configured ? { configured: true } : {}),
+      ...(description ? { description } : {}),
+    });
+  }
+  return result;
+}

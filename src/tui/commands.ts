@@ -12,8 +12,8 @@ import { suggestProviders } from "./provider-suggestions.js";
 /** The name of every interactive slash command, for the usage help text. */
 export const INTERACTIVE_COMMAND_NAMES = [
   "/session [<session-id>]",
-  "/model [manager|sidekick] [<model-id>]",
-  "/provider",
+  "/model [manager|sidekick] [<provider-id> <model-id>]",
+  "/provider [<provider-id>]",
   "/memory add user <text>",
   "/memory add project <text>",
   "/memory search <query>",
@@ -26,22 +26,47 @@ const ROLE_OPTIONS: AutocompleteItem[] = [
   { value: "sidekick ", label: "sidekick", description: "Switch the sidekick role" },
 ];
 
-/** Fetch the model dropdown for a role's current provider. */
+/**
+ * Model dropdown for /model <role>. Aggregates models across configured
+ * providers (provider visible for disambiguation). Falls back to the role's
+ * current provider only when no provider source is wired.
+ */
 function modelIdCompletions(
-  provider: string,
+  role: "manager" | "sidekick",
+  providerOf: RoleProviderResolver,
   suggest: ModelSuggestionSource,
+  suggestProvidersSource?: ProviderSuggestionSource,
 ): (prefix: string) => Promise<AutocompleteItem[] | null> {
   return async (argumentPrefix: string): Promise<AutocompleteItem[] | null> => {
     const prefix = argumentPrefix.trim();
-    const suggestions = await suggest(provider);
-    const items = suggestions.map((item) => ({
-      value: item.id,
+    let providers: string[];
+    if (suggestProvidersSource) {
+      const configured = (await suggestProvidersSource()).filter((item) => item.configured);
+      providers = configured.length > 0
+        ? configured.map((item) => item.id)
+        : [providerOf(role)].filter((value) => value.length > 0);
+    } else {
+      const current = providerOf(role);
+      providers = current ? [current] : [];
+    }
+
+    const results = await Promise.all(providers.map(async (provider) => {
+      try {
+        return await suggest(provider);
+      } catch {
+        return [];
+      }
+    }));
+    const items = results.flat().map((item) => ({
+      value: `${item.provider} ${item.id}`,
       label: item.id,
-      ...(item.description ? { description: item.description } : {}),
+      description: [item.provider, item.description].filter(Boolean).join(" · "),
     }));
     const filtered = prefix.length === 0
       ? items
-      : items.filter((item) => item.value.toLowerCase().includes(prefix.toLowerCase()));
+      : items.filter((item) =>
+        `${item.value} ${item.label}`.toLowerCase().includes(prefix.toLowerCase()),
+      );
     return filtered.length > 0 ? filtered : null;
   };
 }
@@ -124,25 +149,21 @@ export function createSlashCommands(
     {
       name: "/model",
       description: "Switch the manager or sidekick model",
-      argumentHint: "manager|sidekick [<model-id>]",
+      argumentHint: "manager|sidekick [<provider-id> <model-id>]",
       getArgumentCompletions(
         argumentPrefix: string,
       ): AutocompleteItem[] | Promise<AutocompleteItem[] | null> | null {
         const prefix = argumentPrefix.trim();
         // After the role pick ("/model manager" or "/model manager <id>"),
-        // offer that role's provider's model IDs, fetched live from the
-        // catalog. A bare role name (with or without trailing space) already
-        // switches to model-id completion.
+        // offer models from configured providers, fetched live.
         const role = /^manager(\s|$)/.test(argumentPrefix)
           ? "manager"
           : /^sidekick(\s|$)/.test(argumentPrefix)
             ? "sidekick"
             : undefined;
         if (role) {
-          const provider = providerOf(role);
-          if (!provider) return null;
           const modelPrefix = prefix.slice(role.length).trimStart();
-          return modelIdCompletions(provider, suggest)(modelPrefix);
+          return modelIdCompletions(role, providerOf, suggest, providers)(modelPrefix);
         }
         // Role pick: manager | sidekick.
         const filtered = ROLE_OPTIONS.filter((option) => option.value.startsWith(prefix));

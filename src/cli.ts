@@ -18,11 +18,11 @@ import type { AgentTuiOptions, LocalManagerEvent } from "./tui/app.js";
 import { INTERACTIVE_COMMAND_NAMES } from "./tui/commands.js";
 import type { ContextSummary } from "./tui/footer.js";
 import { sessionSuggestionsFromStore } from "./tui/session-suggestions.js";
-import type { ModelSuggestionSource } from "./tui/model-suggestions.js";
-import { suggestModels } from "./tui/model-suggestions.js";
+import type { ModelSuggestion, ModelSuggestionSource } from "./tui/model-suggestions.js";
+import { suggestModels, suggestModelsAcrossConfiguredProviders } from "./tui/model-suggestions.js";
 import type { LocalDelegateEvent } from "./tui/sidekick.js";
 import { sanitizeText } from "./tui/header.js";
-import { suggestProviders } from "./tui/provider-suggestions.js";
+import { suggestProviders, suggestProvidersWithAuth } from "./tui/provider-suggestions.js";
 import { credentialAvailable } from "./tui/provider-suggestions.js";
 import type { ProviderSuggestionSource } from "./tui/provider-suggestions.js";
 
@@ -94,6 +94,11 @@ export interface InteractiveCommandOptions {
   refreshTui?(): void;
   /** Injectable model suggestions for /model; defaults to pi-ai + Command Code. */
   suggestModels?: ModelSuggestionSource;
+  /**
+   * Aggregate model suggestions across configured providers for /model;
+   * defaults to cross-provider discovery over configured providers.
+   */
+  aggregateModels?: (providerSource: () => Promise<{ id: string; configured?: boolean }[]>) => Promise<ModelSuggestion[]>;
   /** Injectable provider suggestions for /provider; defaults to pi-ai + Command Code. */
   suggestProviders?: ProviderSuggestionSource;
   /** Credential store for /provider key setup (auth.json). */
@@ -303,34 +308,84 @@ async function handleModelCommand(
   const parts = rest.split(/\s+/).filter(Boolean);
   const first = parts[0];
   const role = modelRole(first);
+
+  // Bare /model: show both roles' current provider + model.
   if (role === undefined) {
-    const current = roleLabel(options.runtime.manager) + " / " + roleLabel(options.runtime.sidekick);
     options.showInfo([
-      "Usage: /model manager <model-id> or /model sidekick <model-id>",
-      `Current: manager ${roleLabel(options.runtime.manager)} · sidekick ${roleLabel(options.runtime.sidekick)}`,
+      "Usage: /model manager [<provider-id> <model-id>] or /model sidekick [<provider-id> <model-id>]",
+      `Manager: ${roleLabel(options.runtime.manager)}`,
+      `Sidekick: ${roleLabel(options.runtime.sidekick)}`,
+      "Browse models from configured providers; selecting a model also selects its provider.",
     ].join("\n"));
     return;
   }
-  const modelId = parts.slice(1).join(" ").trim();
-  if (!modelId) {
-    const suggestions = await (options.suggestModels ?? suggestModels)(options.runtime[role].provider);
+
+  const args = parts.slice(1);
+  const argText = args.join(" ").trim();
+  const suggest = options.suggestModels ?? suggestModels;
+
+  // Aggregated suggestions across configured providers (lazy, bounded).
+  const aggregate = options.aggregateModels ??
+    ((providerSource) => suggestModelsAcrossConfiguredProviders(providerSource, suggest));
+
+  // No model args: show the aggregated dropdown (all configured providers).
+  if (args.length === 0) {
+    const suggestions = await aggregate(() =>
+      (options.suggestProviders ?? suggestProviders)(),
+    );
     const list = suggestions.length > 0
-      ? suggestions.map((item) => `  ${item.id}${item.description ? ` (${item.description})` : ""}`).join("\n")
-      : "  (no suggestions available)";
+      ? suggestions
+        .map((item) => `  ${item.id}${item.description ? ` (${item.description})` : ""}  [${item.provider}]`)
+        .join("\n")
+      : "  (no configured providers with discoverable models)";
     options.showInfo([
-      `Usage: /model ${role} <model-id>`,
-      `Current ${role} model: ${roleLabel(options.runtime[role])}`,
-      `Available for provider ${options.runtime[role].provider}:`,
+      `Usage: /model ${role} <provider-id> <model-id>`,
+      `Current ${role}: ${roleLabel(options.runtime[role])}`,
+      "Available models from configured providers:",
       list,
     ].join("\n"));
     return;
   }
+
+  // Determine provider + model. Canonical: <provider> <model>. Back-compat:
+  // a single <model> is interpreted against the role's current provider.
+  let provider: string;
+  let modelId: string;
+  if (args.length === 1) {
+    provider = options.runtime[role].provider;
+    modelId = args[0]!;
+  } else {
+    provider = args[0]!;
+    modelId = args.slice(1).join(" ").trim();
+  }
+  if (!modelId) {
+    options.showError(`Usage: /model ${role} <provider-id> <model-id>`);
+    return;
+  }
+
+  // Validate the provider/model pair against the aggregated catalog so an
+  // unknown provider or mismatched model never silently persists.
+  const suggestions = await aggregate(() =>
+    (options.suggestProviders ?? suggestProviders)(),
+  );
+  const match = suggestions.find(
+    (item) => item.provider === provider && item.id === modelId,
+  );
+  if (!match) {
+    options.showError(
+      `Model ${terminalText(modelId, 100)} is not available on provider ${terminalText(provider, 100)}. ` +
+      `Run /model ${role} to browse models from configured providers.`,
+    );
+    return;
+  }
+
   const previous = roleLabel(options.runtime[role]);
   options.runtime[role] = {
     ...options.runtime[role],
-    model: modelId,
+    provider: match.provider,
+    model: match.id,
   };
-  options.showInfo(`Switched ${role} model: ${previous} → ${roleLabel(options.runtime[role])}`);
+  options.showInfo(`Switched ${role}: ${previous} → ${roleLabel(options.runtime[role])}`);
   options.refreshTui?.();
 }
 
@@ -524,7 +579,8 @@ async function runInteractive(
   suggestProvidersSource?: ProviderSuggestionSource,
   auth?: AuthStore,
 ): Promise<number> {
-  const providers = suggestProvidersSource ?? suggestProviders;
+  const providers: ProviderSuggestionSource = suggestProvidersSource ??
+    (async () => suggestProvidersWithAuth(auth));
   let sessionId = shouldContinue ? await newestManagerSession(store) : undefined;
   if (shouldContinue && !sessionId) {
     io.stderr("No manager session is available to continue. Run mimin first.\n");
@@ -633,8 +689,8 @@ async function runInteractive(
       activeController = controller;
       let receivedManagerText = false;
       let completed = false;
+      let authKey: string | undefined;
       try {
-        let authKey: string | undefined;
         if (auth) {
           try {
             authKey = await auth.effectiveKey(
@@ -696,7 +752,7 @@ async function runInteractive(
           const role = runtime.manager;
           let learner: MemoryLearner | undefined;
           try {
-            learner = new MemoryLearner({ role });
+            learner = new MemoryLearner({ role, ...(authKey ? { apiKey: authKey } : {}) });
           } catch {
             learner = undefined;
           }

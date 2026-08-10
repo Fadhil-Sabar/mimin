@@ -109,24 +109,33 @@ Slash commands are intercepted in interactive mode before any model call. Typing
 
 #### `/model`
 
-Switches the manager or sidekick model during an interactive session without restarting mimin.
+Chooses which provider and model actually run for each role during an interactive session.
 
-- Type `/model`, pick a role (`manager` or `sidekick`) from the dropdown, then pick a model from the live list.
-- The model list is provider-specific: built-in pi-ai providers show their registry, and `commandcode` fetches its live catalog.
-- Filtering is case-insensitive and matches anywhere in the id (e.g. `sol` finds `gpt-5.6-sol`).
+- Type `/model`, pick a role (`manager` or `sidekick`) from the dropdown, then browse **models from every configured provider** (commandcode, openrouter, openai, …) in one list.
+- Each entry shows the model and its provider, so models with the same id across providers stay distinct (e.g. `gpt-5.6-sol` under `commandcode` vs an identically named model under another provider).
+- Selecting a model **atomically sets that role's provider and model**. The manager and sidekick stay independent — one can use `commandcode/gpt-5.6-sol` while the other uses `openrouter/anthropic/claude-sonnet-x`.
+- Only providers that appear configured (environment, native auth, or `auth.json`) contribute models; unconfigured providers are not shown.
+- Filtering is case-insensitive and matches the model id or provider (e.g. `command` finds commandcode models, `sol` finds `gpt-5.6-sol`).
 
-The switch applies to subsequent turns in this session only; it does **not** persist to `~/.mimin/config.json` or the project config.
+Direct syntax is deterministic:
+
+```text
+/model manager  <provider-id> <model-id>
+/model sidekick <provider-id> <model-id>
+```
+
+A single model id (`/model manager gpt-5.6-sol`) is interpreted against that role's current provider for backward compatibility.
+
+The switch applies to subsequent turns in this session only; it does **not** persist to `~/.mimin/config.json` or the project config. After restart, startup configuration comes from config normally.
 
 #### `/provider`
 
-Lists every known provider with a credential hint and whether credentials appear configured.
+Configures provider connectivity and credentials. `/provider` is **not** a runtime provider selector — choosing which provider/model runs happens through `/model`.
 
-- The provider list comes from pi-ai's registry plus mimin's custom `commandcode` provider.
+- Lists every known provider (pi-ai's registry plus mimin's custom `commandcode`) with whether credentials appear configured.
 - Each entry shows the environment variable (or native auth source) the provider needs, e.g. `openai — requires OPENAI_API_KEY`.
-- Filtering is case-insensitive and matches anywhere in the id, consistent with `/model`.
 - Credential detection only checks whether the expected source appears available — it never reads or displays credential values.
-
-`/provider` is informational only: it never switches a role's provider or model. Providers and models are configured in `config.json`; use `/model <role>` to switch a role's model for the current session.
+- Providers configured only through `auth.json` count as configured and their models appear in `/model`.
 
 ##### Setting up a provider key
 
@@ -137,7 +146,7 @@ Run `/provider <provider-id>` (e.g. `/provider commandcode`) to set up that prov
 - Built-in pi-ai providers continue to use their env vars or native auth; the interactive prompt is a fallback for providers that need a key.
 - Keys are never logged, rendered, or returned — `/provider` only reports `configured` / `not configured`.
 
-Secrets cannot be configured through `config.json`; use the `/provider` key prompt or environment variables.
+Secrets cannot be configured through `config.json`; use the `/provider` key prompt or environment variables. Once a provider is configured, its models are available through `/model manager` and `/model sidekick` — no separate activation step.
 
 #### `/session`
 

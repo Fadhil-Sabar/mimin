@@ -165,6 +165,24 @@ describe("MemoryLearner", () => {
     const result = await learner.learn(["hello"]);
     expect(result).toEqual({ candidates: [], status: "none", learned: 0 });
   });
+
+  test("passes a resolved auth.json apiKey to the completion request", async () => {
+    let receivedOptions: { apiKey?: string } | undefined;
+    const learner = new MemoryLearner({
+      role: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
+      model: FAKE_MODEL,
+      apiKey: "sk-stored-from-auth-json",
+      complete: async (_model, _context, options) => {
+        receivedOptions = options ?? {};
+        return assistantMessage(JSON.stringify({ candidates: [] }));
+      },
+    });
+    const result = await learner.learn(["I prefer Bun"]);
+    expect(result.status).toBe("none");
+    // The stored credential is forwarded so the learner's request works
+    // without a COMMANDCODE_API_KEY env var.
+    expect(receivedOptions?.apiKey).toBe("sk-stored-from-auth-json");
+  });
 });
 
 describe("learnFromTurn integration", () => {

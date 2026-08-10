@@ -50,6 +50,8 @@ export interface MemoryLearnerOptions {
   role: RoleConfig;
   /** Model resolution (defaults to pi-ai + Command Code). */
   model?: Model<Api>;
+  /** Provider API key resolved by the caller (e.g. from auth.json). */
+  apiKey?: string;
   /** Bounded stream completion; injectable for tests. */
   complete?: typeof completeSimple;
   /** Maximum context characters sent to the learner (default 6,000). */
@@ -141,12 +143,14 @@ export class MemoryLearner {
   private readonly model: Model<Api>;
   private readonly complete: typeof completeSimple;
   private readonly contextLimit: number;
+  private readonly apiKey?: string;
 
   constructor(options: MemoryLearnerOptions) {
     this.role = { ...options.role };
     this.model = options.model ?? modelFromRole(options.role);
     this.complete = options.complete ?? completeSimple;
     this.contextLimit = options.contextLimit ?? 6_000;
+    this.apiKey = options.apiKey;
   }
 
   /**
@@ -185,7 +189,7 @@ export class MemoryLearner {
       const assistant = await this.complete(
         this.model,
         { messages: [{ role: "user", content: context, timestamp: Date.now() }] },
-        { signal, maxTokens: 1_000 },
+        { signal, maxTokens: 1_000, ...(this.apiKey ? { apiKey: this.apiKey } : {}) },
       );
       response = extractAssistantText(assistant);
     } catch {

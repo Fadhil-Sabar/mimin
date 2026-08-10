@@ -457,7 +457,8 @@ describe("interactive integration", () => {
     expect(cancelled).toBe(0);
   });
 
-  test("/model switches the manager and sidekick model at runtime", async () => {    const { workspace, config } = await fixture();
+  test("/model switches provider+model atomically per role", async () => {
+    const { workspace, config } = await fixture();
     const runtime = new AgentRuntime(config);
     const info: string[] = [];
     const errors: string[] = [];
@@ -469,40 +470,186 @@ describe("interactive integration", () => {
       showInfo: (text: string) => { info.push(text); },
       showError: (text: string) => { errors.push(text); },
       refreshTui: () => { refreshed += 1; },
-      suggestModels: async () => [{ id: "gpt-5.5" }, { id: "deepseek/deepseek-v4-flash" }],
+      suggestModels: async (provider: string) =>
+        provider === "openrouter"
+          ? [{ provider: "openrouter", id: "gpt-5.5" }, { provider: "openrouter", id: "deepseek/deepseek-v4-flash" }]
+          : [{ provider: "fake", id: "manager" }],
+      suggestProviders: async () => [
+        { id: "fake", configured: true },
+        { id: "openrouter", configured: true },
+      ],
     };
 
-    // Bare /model shows usage and current models; no switch.
+    // Bare /model shows usage and current selections; no switch.
     expect(await handleInteractiveCommand("/model", options)).toBe(true);
     expect(info.at(-1)).toContain("Usage: /model manager");
     expect(info.at(-1)).toContain("fake/manager");
     expect(runtime.manager.model).toBe("manager");
     expect(refreshed).toBe(0);
 
-    // /model manager <id> switches and refreshes the TUI.
-    expect(await handleInteractiveCommand("/model manager gpt-5.5", options)).toBe(true);
+    // /model manager <provider> <model> switches both atomically.
+    expect(await handleInteractiveCommand("/model manager openrouter gpt-5.5", options)).toBe(true);
+    expect(runtime.manager.provider).toBe("openrouter");
     expect(runtime.manager.model).toBe("gpt-5.5");
-    expect(runtime.manager.provider).toBe("fake");
-    expect(info.at(-1)).toContain("manager → fake/gpt-5.5");
+    expect(info.at(-1)).toContain("fake/manager → openrouter/gpt-5.5");
     expect(refreshed).toBe(1);
 
-    // /model sidekick <id> switches the sidekick.
-    expect(await handleInteractiveCommand("/model sidekick deepseek/deepseek-v4-flash", options)).toBe(true);
+    // /model sidekick <provider> <model> switches the sidekick independently.
+    expect(await handleInteractiveCommand("/model sidekick openrouter deepseek/deepseek-v4-flash", options)).toBe(true);
+    expect(runtime.sidekick.provider).toBe("openrouter");
     expect(runtime.sidekick.model).toBe("deepseek/deepseek-v4-flash");
-    expect(info.at(-1)).toContain("sidekick → fake/deepseek/deepseek-v4-flash");
+    expect(info.at(-1)).toContain("Switched sidekick: fake/sidekick → openrouter/deepseek/deepseek-v4-flash");
     expect(refreshed).toBe(2);
 
-    // /model <role> alone lists suggestions for that role's provider.
-    expect(await handleInteractiveCommand("/model sidekick", options)).toBe(true);
+    // /model <role> alone lists aggregated models from configured providers.
+    expect(await handleInteractiveCommand("/model manager", options)).toBe(true);
     expect(info.at(-1)).toContain("gpt-5.5");
     expect(info.at(-1)).toContain("deepseek/deepseek-v4-flash");
-    expect(runtime.sidekick.model).toBe("deepseek/deepseek-v4-flash");
-
-    // Unknown role shows usage, does not switch.
-    expect(await handleInteractiveCommand("/model nope whatever", options)).toBe(true);
-    expect(info.at(-1)).toContain("Usage: /model manager");
+    expect(info.at(-1)).toContain("openrouter");
     expect(runtime.manager.model).toBe("gpt-5.5");
-    expect(refreshed).toBe(2);
+
+    // Back-compat single model id: interpreted against the role's current provider.
+    // Manager is currently openrouter, so "gpt-5.5" resolves to openrouter/gpt-5.5.
+    expect(await handleInteractiveCommand("/model manager gpt-5.5", options)).toBe(true);
+    expect(runtime.manager.provider).toBe("openrouter");
+    expect(runtime.manager.model).toBe("gpt-5.5");
+
+    // Unknown provider/model pair is rejected; nothing mutates.
+    expect(await handleInteractiveCommand("/model manager openai gpt-9.9", options)).toBe(true);
+    expect(errors.at(-1)).toContain("is not available on provider openai");
+    expect(runtime.manager.provider).toBe("openrouter");
+    expect(runtime.manager.model).toBe("gpt-5.5");
+    expect(refreshed).toBe(3);
+    expect(errors.length).toBe(1);
+  });
+
+  test("/model aggregated dropdown only includes configured providers", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      suggestModels: async (provider: string) =>
+        provider === "commandcode"
+          ? [{ provider: "commandcode", id: "gpt-5.6-sol" }]
+          : provider === "openrouter"
+            ? [{ provider: "openrouter", id: "anthropic/claude-sonnet-x" }]
+            : [],
+      suggestProviders: async () => [
+        { id: "commandcode", configured: true },
+        { id: "openrouter", configured: true },
+        { id: "anthropic", configured: false },
+        { id: "openai", configured: false },
+      ],
+    };
+
+    await handleInteractiveCommand("/model sidekick", options);
+    const text = info.at(-1) ?? "";
+    // Configured providers' models appear.
+    expect(text).toContain("gpt-5.6-sol");
+    expect(text).toContain("anthropic/claude-sonnet-x");
+    // Unconfigured providers' models are absent.
+    expect(text).not.toContain("claude-sonnet-4-6");
+    expect(errors).toEqual([]);
+  });
+
+  test("/model keeps duplicate model ids distinct by provider", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      suggestModels: async (provider: string) =>
+        provider === "provider-a" || provider === "provider-b"
+          ? [{ provider, id: "shared-model" }]
+          : [],
+      suggestProviders: async () => [
+        { id: "provider-a", configured: true },
+        { id: "provider-b", configured: true },
+      ],
+    };
+
+    // Select the same model id on provider-b; provider must be preserved.
+    expect(await handleInteractiveCommand("/model manager provider-b shared-model", options)).toBe(true);
+    expect(runtime.manager.provider).toBe("provider-b");
+    expect(runtime.manager.model).toBe("shared-model");
+    // Selecting provider-a's copy moves the provider.
+    expect(await handleInteractiveCommand("/model manager provider-a shared-model", options)).toBe(true);
+    expect(runtime.manager.provider).toBe("provider-a");
+    expect(runtime.manager.model).toBe("shared-model");
+    expect(errors).toEqual([]);
+  });
+
+  test("/model includes commandcode models when auth.json has the key (no env)", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    // auth.json holds the commandcode key; no COMMANDCODE_API_KEY env var.
+    const auth = new AuthStore({ dataDir: config.dataDir, env: {} });
+    await auth.setKey("commandcode", "sk-stored-key");
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      auth,
+      suggestModels: async (provider: string) =>
+        provider === "commandcode"
+          ? [{ provider: "commandcode", id: "gpt-5.6-sol" }]
+          : [],
+      // The default provider source in runInteractive uses suggestProvidersWithAuth;
+      // simulate that here.
+      suggestProviders: async () => [
+        { id: "commandcode", configured: true },
+      ],
+    };
+
+    await handleInteractiveCommand("/model manager", options);
+    const text = info.at(-1) ?? "";
+    expect(text).toContain("gpt-5.6-sol");
+    expect(text).not.toContain("sk-stored-key");
+    expect(errors).toEqual([]);
+  });
+
+  test("/model aggregation survives a failing provider catalog", async () => {
+    const { workspace, config } = await fixture();
+    const runtime = new AgentRuntime(config);
+    const info: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime,
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      suggestModels: async (provider: string) => {
+        if (provider === "broken") throw new Error("catalog down");
+        return [{ provider, id: `model-${provider}` }];
+      },
+      suggestProviders: async () => [
+        { id: "broken", configured: true },
+        { id: "good", configured: true },
+      ],
+    };
+
+    await handleInteractiveCommand("/model manager", options);
+    const text = info.at(-1) ?? "";
+    // The working provider's model is present despite the broken catalog.
+    expect(text).toContain("model-good");
+    // The broken provider contributes nothing; no error surfaced.
+    expect(text).not.toContain("model-broken");
     expect(errors).toEqual([]);
   });
 
