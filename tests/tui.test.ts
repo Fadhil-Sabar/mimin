@@ -73,6 +73,8 @@ describe("lightweight pi-tui areas", () => {
     const header = new Header({
       product: "mi\u001b[31mmin",
       managerModel: "manager\nmodel",
+      sidekickModel: "sidekick\u0000model",
+      sessionId: "manager-abc12345",
       workspace: "/long/workspace/project",
     });
     const footer = new Footer({
@@ -87,8 +89,11 @@ describe("lightweight pi-tui areas", () => {
     }
     const rendered = textOf([...header.render(80), ...footer.render(80)]);
     expect(rendered).not.toContain("\u001b[31m");
-    expect(rendered).toContain("project");
+    // The compact header shows role identity, not the workspace.
+    expect(rendered).toContain("manager");
     expect(rendered).toContain("50/100 (50%)");
+    // The workspace is retained for call-site compatibility but never rendered.
+    expect(rendered).not.toContain("project");
   });
 
   test("transcript updates one manager component during streaming", () => {
@@ -123,9 +128,10 @@ describe("lightweight pi-tui areas", () => {
     expect(lines).toContain("bold");
     expect(lines).toContain("code");
     expect(lines).toContain("item");
-    // One ◆ Manager heading per entry; no repeated "Manager:" prefix.
-    expect(lines).toContain("◆ Manager");
+    // A bare "Mimin" label line, then the markdown body (no "Manager:" prefix).
+    expect(lines).toContain("Mimin");
     expect(lines).not.toContain("Manager:");
+    expect(lines).not.toContain("◆ Manager");
     // Raw markdown markers never reach rendered output (the list renders as a
     // styled bullet, not the source "- item" line).
     expect(lines).not.toContain("# Title");
@@ -134,12 +140,15 @@ describe("lightweight pi-tui areas", () => {
     expect(lines).toContain("item");
   });
 
-  test("user entries render as > text with no You: label", () => {
+  test("user entries render a distinct You label with no You: prefix", () => {
     const transcript = new Transcript();
     transcript.append("user", "hello world");
     const lines = textOf(transcript.render(60));
-    expect(lines).toContain("> hello world");
+    // A distinct "You" label line, then the plain text body.
+    expect(lines).toContain("You");
+    expect(lines).toContain("hello world");
     expect(lines).not.toContain("You:");
+    expect(lines).not.toContain("> hello world");
   });
 
   test("sidekick cards collapse, expand safe activity, and never retain raw fields", () => {
@@ -194,24 +203,22 @@ describe("lightweight pi-tui areas", () => {
     } as Parameters<SidekickActivity["apply"]>[0]);
 
     const collapsed = textOf(cards.render(100));
-    expect(collapsed).toContain("✓ Complete");
+    // Compact box card with lowercase safe activity rows and semantic status.
+    expect(collapsed).toContain("✓ done");
     expect(collapsed).toContain("implemented safely");
-    expect(collapsed).not.toContain("edit");
+    expect(collapsed).toContain("edit src/safe.ts");
     // Box card shape and hidden UUIDs.
-    expect(collapsed).toContain("┌ Sidekick");
+    expect(collapsed).toContain("┌─ sidekick #1");
     expect(collapsed).toContain("└");
     expect(collapsed).not.toContain("session-0");
-
-    expect(cards.toggle("session-0")).toBe(true);
-    const expanded = textOf(cards.render(100));
-    expect(expanded).toContain("src/safe.ts");
+    // Only whitelisted activity labels reach the card; private fields never do.
     for (const secret of [
       "SIDEKICK TRANSCRIPT",
       "PRIVATE REASONING",
       "RAW COMMAND OUTPUT",
       "PRIVATE FILE CONTENT",
       "FULL LOG",
-    ]) expect(expanded).not.toContain(secret);
+    ]) expect(collapsed).not.toContain(secret);
     expectWidth(cards.render(7), 7);
   });
 
@@ -224,7 +231,7 @@ describe("lightweight pi-tui areas", () => {
     ] as const) {
       const cards = new SidekickActivity();
       cards.apply({ type: "delegation_started", index, taskCount: 4 });
-      expect(textOf(cards.render(80))).toContain("● Running");
+      expect(textOf(cards.render(80))).toContain("○ queued");
       cards.apply({
         type: "delegation_finished",
         index,
@@ -232,12 +239,13 @@ describe("lightweight pi-tui areas", () => {
         result: { status, summary: status, sessionId: `s-${index}` },
       });
       const verb = status === "needs_decision"
-        ? "Needs decision"
+        ? "× decision"
         : status === "blocked"
-          ? "Failed"
-          : status[0]?.toUpperCase() + status.slice(1);
-      const mark = status === "complete" ? "✓" : "✗";
-      expect(textOf(cards.render(80))).toContain(`${mark} ${verb}`);
+          ? "× failed"
+          : status === "complete"
+            ? "✓ done"
+            : "× partial";
+      expect(textOf(cards.render(80))).toContain(verb);
     }
   });
 
@@ -261,9 +269,10 @@ describe("lightweight pi-tui areas", () => {
     expect(host.children).toEqual([
       app.header,
       app.transcript,
-      app.sidekicks,
       app.footer,
     ]);
+    // The sidekick view model is NOT a top-level TUI child (cards are inline).
+    expect(host.children).not.toContain(app.sidekicks);
     app.footer.input.setText("   ");
     app.footer.handleInput("\r");
     app.footer.input.setText("ship it");
@@ -272,15 +281,15 @@ describe("lightweight pi-tui areas", () => {
     await Promise.resolve();
     await Promise.resolve();
     expect(submitted).toEqual(["ship it"]);
-    expect(textOf(app.transcript.render(80))).toContain("> ship it");
+    expect(textOf(app.transcript.render(80))).toContain("ship it");
+    expect(textOf(app.transcript.render(80))).toContain("You");
 
-    // setRunning flips the header/footer immediately, before any model event.
+    // setRunning flips the footer immediately, before any model event.
+    // (The compact header renders no run state.)
     app.setRunning(true);
-    expect(textOf(app.header.render(80))).toContain("working");
-    expect(textOf(app.footer.render(80))).toContain("working");
+    expect(textOf(app.footer.render(80))).toContain("esc cancel");
     app.setRunning(false);
-    expect(textOf(app.header.render(80))).toContain("idle");
-    expect(textOf(app.footer.render(80))).not.toContain("working");
+    expect(textOf(app.footer.render(80))).not.toContain("esc cancel");
 
     app.handleManagerEvent({ type: "model_event", event: { type: "text_start" } });
     app.handleManagerEvent({ type: "model_event", event: { type: "text_delta", delta: "done" } });
@@ -289,8 +298,9 @@ describe("lightweight pi-tui areas", () => {
     const transcriptLines = textOf(app.transcript.render(80));
     expect(transcriptLines).toContain("done");
     expect(transcriptLines).not.toContain("Manager: done");
-    // Streaming sets the header run state to running.
-    expect(app.header.render(80).join("\n")).toContain("working");
+    // The header stays identity-only (no run state) while the run is active.
+    expect(textOf(app.header.render(80))).not.toContain("working");
+    expect(textOf(app.header.render(80))).toContain("manager");
 
     // PageUp during a run pages the transcript back without exiting.
     expect(host.listener?.("\u001b[5~")).toEqual({ consume: true });
@@ -387,9 +397,9 @@ describe("lightweight pi-tui areas", () => {
     });
 
     const rows = textOf(app.transcript.render(80));
-    // Title-case aligned labels, path from tool_start args, no debug text.
-    expect(rows).toContain("✓ Read    src/app.ts");
-    expect(rows).toContain("✕ Edit");
+    // Lowercase aligned labels, path from tool_start args, no debug text.
+    expect(rows).toContain("✓ read   src/app.ts");
+    expect(rows).toContain("✕ edit");
     expect(rows).toContain("oldText was not found");
     expect(rows).not.toContain("(turn");
     expect(rows).not.toContain("[ok]");
@@ -422,8 +432,8 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("● Bash    bun test");
-    expect(rows).toContain("● Edit    src/cli.ts");
+    expect(rows).toContain("● bash   bun test");
+    expect(rows).toContain("● edit   src/cli.ts");
     expect(rows).toContain("…");
   });
 
@@ -466,24 +476,24 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
     });
-    expect(textOf(app.transcript.render(80))).toContain("● Read    a.ts");
+    expect(textOf(app.transcript.render(80))).toContain("● read   a.ts");
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
     });
-    expect(textOf(app.transcript.render(80))).toContain("✓ Read    a.ts");
+    expect(textOf(app.transcript.render(80))).toContain("✓ read   a.ts");
     // Edit: fails.
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "edit", arguments: { path: "b.ts" } } },
     });
-    expect(textOf(app.transcript.render(80))).toContain("● Edit    b.ts");
+    expect(textOf(app.transcript.render(80))).toContain("● edit   b.ts");
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_end", turn: 1, toolCall: { name: "edit" }, result: { isError: true, text: "boom" } },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("✕ Edit    b.ts");
+    expect(rows).toContain("✕ edit   b.ts");
     expect(rows).toContain("boom");
   });
 
@@ -508,7 +518,7 @@ describe("lightweight pi-tui areas", () => {
     });
     const rows = textOf(app.transcript.render(80));
     // The name is already in the label column; the prefix is stripped.
-    expect(rows).toContain("✕ Read    src");
+    expect(rows).toContain("✕ read   src");
     expect(rows).not.toContain('Tool "read" failed:');
     expect(rows).toContain('Path "src" is not a regular file');
   });
@@ -536,7 +546,7 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("✕ Bash");
+    expect(rows).toContain("✕ bash");
     expect(rows).toContain("ENOENT: no such file");
     expect(rows).not.toContain("\u001b[31m");
     // The error sub-line is compact: "· " marker plus a 60-char error cap.
@@ -562,9 +572,9 @@ describe("lightweight pi-tui areas", () => {
     });
     const rows = textOf(app.transcript.render(80));
     // Exactly one row, now completed; no second "running" copy survives.
-    expect(rows.match(/Read/g)).toHaveLength(1);
-    expect(rows).toContain("✓ Read    a.ts");
-    expect(rows).not.toContain("● Read");
+    expect(rows.match(/read/g)).toHaveLength(1);
+    expect(rows).toContain("✓ read   a.ts");
+    expect(rows).not.toContain("● read");
   });
 
   test("tool rows group per turn, inline in conversation order", () => {
@@ -606,15 +616,15 @@ describe("lightweight pi-tui areas", () => {
 
     const rows = textOf(app.transcript.render(80));
     // Both tool blocks appear inline, after their user prompt / manager text.
-    expect(rows).toContain("> fix the bug");
-    expect(rows).toContain("✓ Read    a.ts");
-    expect(rows).toContain("✓ Verify  bun test");
+    expect(rows).toContain("fix the bug");
+    expect(rows).toContain("✓ read   a.ts");
+    expect(rows).toContain("✓ verify bun test");
     expect(rows).toContain("done");
-    expect(rows).toContain("✓ Read    b.ts");
+    expect(rows).toContain("✓ read   b.ts");
     // Order preserved: turn 1 tools before turn 2 text and tools.
-    expect(rows.indexOf("✓ Read    a.ts")).toBeLessThan(rows.indexOf("✓ Verify  bun test"));
-    expect(rows.indexOf("✓ Verify  bun test")).toBeLessThan(rows.indexOf("done"));
-    expect(rows.indexOf("done")).toBeLessThan(rows.indexOf("✓ Read    b.ts"));
+    expect(rows.indexOf("✓ read   a.ts")).toBeLessThan(rows.indexOf("✓ verify bun test"));
+    expect(rows.indexOf("✓ verify bun test")).toBeLessThan(rows.indexOf("done"));
+    expect(rows.indexOf("done")).toBeLessThan(rows.indexOf("✓ read   b.ts"));
   });
 
   test("bash rows show only the whitelisted command, never raw output", () => {
@@ -641,8 +651,10 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("✓ Bash    bun test");
-    expect(rows).not.toContain("13 pass");
+    expect(rows).toContain("✓ bash   bun test · 13 passed");
+    // Only the parsed count summary is shown; raw output lines never leak.
+    expect(rows).not.toContain("0 fail");
+    expect(rows).not.toContain("[stdout] 4.2s");
     expect(rows).not.toContain("stdout");
   });
 
@@ -656,7 +668,7 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "verification", arguments: { action: "test" } } },
     });
-    expect(textOf(app.transcript.render(80))).toContain("● Verify");
+    expect(textOf(app.transcript.render(80))).toContain("● verify");
     app.handleManagerEvent({
       type: "model_event",
       event: {
@@ -677,7 +689,7 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("✓ Verify  bun test");
+    expect(rows).toContain("✓ verify bun test");
     expect(rows).toContain("passed");
     // No raw output from the details leaks into the row.
     expect(rows).not.toContain("81 tests passed");
@@ -710,11 +722,10 @@ describe("lightweight pi-tui areas", () => {
       task: "implement feature",
       model: "gpt-5.5",
     });
-    const running = textOf(cards.render(100));
-    expect(running).toContain("● Running");
-    expect(running).toContain("Sidekick · gpt-5.5");
-    expect(running).toContain("implement feature");
-    expect(running).not.toContain("session-");
+    const queued = textOf(cards.render(100));
+    expect(queued).toContain("○ queued");
+    expect(queued).toContain("sidekick #1 · implement feature");
+    expect(queued).not.toContain("session-");
 
     cards.apply({
       type: "delegation_finished",
@@ -731,19 +742,24 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const done = textOf(cards.render(100));
-    expect(done).toContain("✓ Complete");
+    expect(done).toContain("✓ done");
     expect(done).toContain("done safely");
+    expect(done).toContain("1 file changed · 1 check passed");
     expect(done).not.toContain("session-abc");
-    expect(cards.toggle("session-abc")).toBe(true);
-    const expanded = textOf(cards.render(100));
-    expect(expanded).toContain("src/app.ts");
-    expect(expanded).toContain("bun test [passed]");
+    // The card id is stable and the renderer targets exactly that card.
+    const id = cards.apply({ type: "delegation_started", index: 1, taskCount: 1, task: "other", model: "gpt-5.5" });
+    expect(id).toBeDefined();
+    const renderer = cards.rendererFor(id!);
+    expect(renderer(100).join("\n")).toContain("sidekick #2 · other");
+    expect(renderer(100).join("\n")).not.toContain("sidekick #1");
   });
 
-  test("header shows thinking and footer shows sidekick working count", () => {
+  test("header shows thinking, models, session; footer shows sidekick working count", () => {
     const header = new Header({
       product: "mimin",
       managerModel: "gpt-5.5",
+      sidekickModel: "deepseek-v4",
+      sessionId: "manager-abc12345",
       workspace: "/repo/project",
       thinking: "high",
     });
@@ -751,18 +767,23 @@ describe("lightweight pi-tui areas", () => {
       managerModel: "gpt-5.5",
       thinking: "high",
       sidekickWorking: 2,
+      sidekickTotal: 3,
     });
-    const headerLines = textOf(header.render(80));
-    expect(headerLines).toContain("gpt-5.5");
+    const headerLines = textOf(header.render(120));
+    expect(headerLines).toContain("manager gpt-5.5");
+    expect(headerLines).toContain("sidekick deepseek-v4");
     expect(headerLines).toContain("thinking high");
-    expect(headerLines).toContain("project");
+    expect(headerLines).toContain("session abc12345");
     expect(headerLines).toContain("·");
+    // The workspace is never rendered by the compact header.
+    expect(headerLines).not.toContain("project");
     const footerLines = textOf(footer.render(80));
-    expect(footerLines).toContain("model gpt-5.5");
-    expect(footerLines).toContain("2 sidekicks working");
+    // Idle footer: slash hints + sidekick working/total status.
+    expect(footerLines).toContain("/help");
+    expect(footerLines).toContain("2/3 sidekicks running");
     // Horizontal rule separates the footer from content above.
     expect(textOf([footer.render(80)[0] ?? ""])).toMatch(/^─+$/);
-    footer.setStatus({ sidekickWorking: 0 });
+    footer.setStatus({ sidekickWorking: 0, sidekickTotal: 0 });
     expect(textOf(footer.render(80))).toContain("sidekick: idle");
   });
 
@@ -861,35 +882,37 @@ describe("lightweight pi-tui areas", () => {
     expect(during).toBe(before);
   });
 
-  test("header run state and turn chip; footer spinner while working", () => {
+  test("header is identity-only (no run state/turn); footer spinner while working", () => {
     const header = new Header({
       managerModel: "gpt-5.5",
       workspace: "/repo/project",
     });
-    expect(textOf(header.render(80))).toContain("idle");
+    expect(textOf(header.render(80))).toContain("manager gpt-5.5");
     expect(textOf(header.render(80))).not.toContain("turn");
+    // Run state and turn are no-ops on the compact header (footer drives status).
     header.setRunState("running");
     header.setTurn(2);
-    expect(textOf(header.render(80))).toContain("working");
-    expect(textOf(header.render(80))).toContain("turn 2");
-    header.setRunState("working");
-    expect(textOf(header.render(80))).toContain("working");
+    expect(textOf(header.render(80))).not.toContain("working");
+    expect(textOf(header.render(80))).not.toContain("turn");
     header.setRunState("idle");
-    expect(textOf(header.render(80))).toContain("idle");
+    expect(textOf(header.render(80))).not.toContain("idle");
 
     const footer = new Footer({
       managerModel: "gpt-5.5",
       managerWorking: true,
     });
-    // The status line carries the working spinner while a run is active.
+    // Running footer: esc cancel / ctrl+c quit + elapsed; no slash hints.
     const statusLines = textOf(footer.render(80));
-    expect(statusLines).toContain("working");
+    expect(statusLines).toContain("esc cancel");
+    expect(statusLines).toContain("ctrl+c quit");
+    expect(statusLines).not.toContain("/help");
     footer.setStatus({ managerWorking: false });
-    // Idle shows the plain prompt, not the spinner.
-    expect(textOf(footer.render(80))).not.toContain("working");
+    // Idle shows the slash hints, not the cancel prompt.
+    expect(textOf(footer.render(80))).toContain("/help");
+    expect(textOf(footer.render(80))).not.toContain("esc cancel");
   });
 
-  test("header turn chip clears when the run returns to idle", () => {
+  test("header turn chip is gone; app setTurn is a compat no-op", () => {
     const host = new FakeTui();
     const app = createApp({
       managerModel: "test-model",
@@ -898,12 +921,11 @@ describe("lightweight pi-tui areas", () => {
     });
     app.handleManagerEvent({ type: "model_event", event: { type: "text_start" } });
     app.setTurn(1);
-    expect(textOf(app.header.render(80))).toContain("turn 1");
-    expect(textOf(app.header.render(80))).toContain("working");
-    // The run ends: turn chip disappears along with the running state.
-    app.handleManagerEvent({ type: "model_event", event: { type: "done" } });
-    expect(textOf(app.header.render(80))).toContain("idle");
     expect(textOf(app.header.render(80))).not.toContain("turn");
+    expect(textOf(app.header.render(80))).not.toContain("working");
+    // The run ends: the footer working state clears with it.
+    app.handleManagerEvent({ type: "model_event", event: { type: "done" } });
+    expect(textOf(app.footer.render(80))).not.toContain("working");
   });
 
   test("transcript scrollback: tail-anchored viewport pages and re-pins", () => {
@@ -940,7 +962,7 @@ describe("lightweight pi-tui areas", () => {
     expect(transcript.render(40).join("\n")).toContain("eight");
   });
 
-  test("running sidekick card shows live elapsed, done cards show summary", () => {
+  test("running sidekick card shows live activity rows; done cards show metrics", () => {
     let now = 0;
     const cards = new SidekickActivity("/repo", () => now);
     cards.apply({
@@ -962,9 +984,9 @@ describe("lightweight pi-tui areas", () => {
       taskCount: 1,
       activity: { type: "tool_started", sessionId: "s-1", tool: "read", detail: "src/a.ts", timestamp: 0 },
     });
-    now = 65_000;
     const running = textOf(cards.render(100));
-    expect(running).toContain("● Reading src/a.ts · 1m5s");
+    expect(running).toContain("● running");
+    expect(running).toContain("read src/a.ts");
     cards.apply({
       type: "delegation_finished",
       index: 0,
@@ -978,12 +1000,13 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const done = textOf(cards.render(100));
-    // Collapsed completion shows a single summary row with duration and metrics.
-    expect(done).toContain("✓ Complete · 1m5s · 1 file changed · 1 check passed");
+    // Collapsed completion shows a status row with metrics.
+    expect(done).toContain("✓ done");
+    expect(done).toContain("1 file changed · 1 check passed");
     expect(done).toContain("done");
   });
 
-  test("sidekick cards cap visible running cards and show a queued badge", () => {
+  test("sidekick queued cards all render inline with a waiting row (no cap on queued)", () => {
     const cards = new SidekickActivity("/repo");
     for (let index = 0; index < 7; index += 1) {
       cards.apply({
@@ -994,12 +1017,14 @@ describe("lightweight pi-tui areas", () => {
       });
     }
     const rendered = textOf(cards.render(100));
-    for (const task of ["task 0", "task 1", "task 2", "task 3"]) {
+    // Queued cards are never capped: every card renders with a waiting row.
+    for (const task of ["task 0", "task 1", "task 2", "task 3", "task 5", "task 6"]) {
       expect(rendered).toContain(task);
     }
-    expect(rendered).not.toContain("task 5");
-    expect(rendered).not.toContain("task 6");
-    expect(rendered).toContain("2 waiting");
+    expect(rendered).toContain("○ queued");
+    expect(rendered).toContain("waiting for turn");
+    // No aggregate badge: nothing is hidden behind a running-card cap.
+    expect(rendered).not.toContain("waiting ┐");
   });
 
   test("sidekick live state shows safe path/command detail from activity", () => {
@@ -1017,7 +1042,7 @@ describe("lightweight pi-tui areas", () => {
         timestamp: 0,
       },
     });
-    expect(textOf(cards.render(100))).toContain("● Reading src/cli.ts");
+    expect(textOf(cards.render(100))).toContain("read src/cli.ts");
     cards.apply({
       type: "sidekick_activity",
       index: 0,
@@ -1043,7 +1068,7 @@ describe("lightweight pi-tui areas", () => {
         timestamp: 2,
       },
     });
-    expect(textOf(cards.render(100))).toContain("● Running bun test");
+    expect(textOf(cards.render(100))).toContain("bash bun test");
     cards.apply({
       type: "sidekick_activity",
       index: 0,
@@ -1069,7 +1094,7 @@ describe("lightweight pi-tui areas", () => {
         timestamp: 4,
       },
     });
-    expect(textOf(cards.render(100))).toContain("● Editing src/app.ts");
+    expect(textOf(cards.render(100))).toContain("edit src/app.ts");
   });
 
   test("completed sidekick card shows a concise metrics row without expansion", () => {
@@ -1094,6 +1119,13 @@ describe("lightweight pi-tui areas", () => {
     expect(collapsed).toContain("2 files changed · 2 checks passed");
     expect(collapsed).not.toContain("bun test");
     expect(collapsed).not.toContain("src/a.ts");
+    // Expanding by session id surfaces the changed file and verification
+    // rows, but never raw transcripts or private fields.
+    expect(cards.toggle("s-1")).toBe(true);
+    const expanded = textOf(cards.render(100));
+    expect(expanded).toContain("src/a.ts");
+    expect(expanded).toContain("bun test [passed]");
+    expect(expanded).toContain("bun run typecheck [passed]");
   });
 
   test("footer editor offers slash-command autocomplete for the interactive family", async () => {
@@ -1454,5 +1486,229 @@ describe("lightweight pi-tui areas", () => {
     // The previous conversation is gone, not appended.
     expect(after).not.toContain("old user message");
     expect(after).not.toContain("old manager reply");
+  });
+
+  test("one sidekick card appends inline once and updates in place", () => {
+    const host = new FakeTui();
+    host.terminal = { rows: 24 };
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      sidekickModel: "deepseek-v4",
+      workspace: "/repo",
+      tui: host,
+    });
+    // A single delegation becomes exactly one inline card.
+    app.handleDelegateEvent({
+      type: "delegation_started",
+      index: 0,
+      taskCount: 1,
+      task: "implement",
+      model: "deepseek-v4",
+    });
+    let view = textOf(app.render(100));
+    expect(view.match(/sidekick #1/g)).toHaveLength(1);
+    expect(view).toContain("○ queued");
+    expect(textOf(app.footer.render(80))).toContain("0/1 sidekicks running");
+
+    // Activity transitions the SAME card in place (still one card), and the
+    // footer working count rises.
+    app.handleDelegateEvent({
+      type: "sidekick_activity",
+      index: 0,
+      taskCount: 1,
+      activity: { type: "sidekick_started", sessionId: "s-1", timestamp: 0 },
+    });
+    app.handleDelegateEvent({
+      type: "sidekick_activity",
+      index: 0,
+      taskCount: 1,
+      activity: { type: "tool_started", sessionId: "s-1", tool: "read", detail: "src/a.ts", timestamp: 0 },
+    });
+    view = textOf(app.render(100));
+    expect(view.match(/sidekick #1/g)).toHaveLength(1);
+    expect(view).toContain("● running");
+    expect(view).toContain("read src/a.ts");
+    expect(textOf(app.footer.render(80))).toContain("1/1 sidekicks running");
+
+    // Completion keeps the same inline card, footer returns to 0 working.
+    app.handleDelegateEvent({
+      type: "delegation_finished",
+      index: 0,
+      taskCount: 1,
+      task: "implement",
+      model: "deepseek-v4",
+      result: { status: "complete", summary: "done", sessionId: "s-1" },
+    });
+    view = textOf(app.render(100));
+    expect(view.match(/sidekick #1/g)).toHaveLength(1);
+    expect(view).toContain("✓ done");
+    // The batch completed: the footer drops back to idle (no active delegation).
+    expect(textOf(app.footer.render(80))).toContain("sidekick: idle");
+
+    // A second delegation appends a second inline card; both persist.
+    app.handleDelegateEvent({
+      type: "delegation_started",
+      index: 1,
+      taskCount: 2,
+      task: "second task",
+      model: "deepseek-v4",
+    });
+    view = textOf(app.render(100));
+    expect(view.match(/sidekick #1/g)).toHaveLength(1);
+    expect(view.match(/sidekick #2/g)).toHaveLength(1);
+    expect(textOf(app.footer.render(80))).toContain("0/2 sidekicks running");
+  });
+
+  test("restoreSession clears inline sidekick cards and the footer counts", () => {
+    const host = new FakeTui();
+    host.terminal = { rows: 24 };
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      sidekickModel: "deepseek-v4",
+      sessionId: "manager-old",
+      workspace: "/repo",
+      tui: host,
+    });
+    app.handleDelegateEvent({
+      type: "delegation_started",
+      index: 0,
+      taskCount: 1,
+      task: "stale card",
+      model: "deepseek-v4",
+    });
+    expect(textOf(app.render(100))).toContain("stale card");
+    expect(textOf(app.footer.render(80))).toContain("0/1 sidekicks running");
+
+    app.restoreSession([{ role: "user", text: "fresh session" }]);
+    const after = textOf(app.render(100));
+    expect(after).not.toContain("stale card");
+    expect(after).not.toContain("sidekick #1");
+    expect(textOf(app.footer.render(80))).toContain("sidekick: idle");
+  });
+
+  test("inline sidekick cards and tool rows fit narrow widths", () => {
+    const host = new FakeTui();
+    host.terminal = { rows: 24 };
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: host,
+    });
+    app.handleDelegateEvent({
+      type: "delegation_started",
+      index: 0,
+      taskCount: 1,
+      task: "implement feature",
+      model: "deepseek-v4",
+    });
+    expectWidth(app.render(30), 30);
+    // A narrow card collapses to plain rows, still truncated to the width.
+    const narrowCard = textOf(app.render(14));
+    expect(narrowCard).toContain("sidekick #1");
+    expectWidth(app.render(14), 14);
+  });
+
+  test("compact tool rows show safe diff summary and exit codes", () => {
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: new FakeTui(),
+    });
+    // Successful edit: +added -removed derived from start args.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: {
+        type: "tool_start",
+        turn: 1,
+        toolCall: { name: "edit", arguments: { path: "src/app.ts", oldText: "a\nb", newText: "a\nb\nc\nd" } },
+      },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "edit" }, result: { isError: false, text: "Updated src/app.ts" } },
+    });
+    expect(textOf(app.transcript.render(80))).toContain("✓ edit   src/app.ts +4 -2");
+
+    // Failed bash: exit code inline + compact error line; no raw output.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "bash", arguments: { command: "bun test" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: {
+        type: "tool_end",
+        turn: 1,
+        toolCall: { name: "bash" },
+        result: { isError: true, text: "exitCode: 2\nstderr: boom", details: { exitCode: 2 } },
+      },
+    });
+    const rows = textOf(app.transcript.render(80));
+    expect(rows).toContain("✕ bash   bun test · exit 2");
+    expect(rows).toContain("boom");
+    expect(rows).not.toContain("exitCode:");
+    expect(rows).not.toContain("stderr:");
+
+    // Successful bash with a test-count summary; never raw output.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "bash", arguments: { command: "bun test" } } },
+    });
+    app.handleManagerEvent({
+      type: "model_event",
+      event: {
+        type: "tool_end",
+        turn: 1,
+        toolCall: { name: "bash" },
+        result: { isError: false, text: "81 tests passed", details: { stdout: "81 tests passed\n" } },
+      },
+    });
+    const ok = textOf(app.transcript.render(80));
+    expect(ok).toContain("✓ bash   bun test · 81 passed");
+    expect(ok).not.toContain("81 tests passed");
+  });
+
+  test("header segment order: manager, thinking, sidekick, session", () => {
+    const header = new Header({
+      product: "mimin",
+      managerModel: "gpt-5.5",
+      sidekickModel: "deepseek-v4",
+      sessionId: "manager-abc123",
+      thinking: "medium",
+    });
+    const line = textOf(header.render(120));
+    const order = [
+      line.indexOf("manager"),
+      line.indexOf("thinking"),
+      line.indexOf("sidekick"),
+      line.indexOf("session"),
+    ];
+    expect(order[0]).toBeGreaterThanOrEqual(0);
+    expect(order[1]).toBeGreaterThan(order[0]!);
+    expect(order[2]).toBeGreaterThan(order[1]!);
+    expect(order[3]).toBeGreaterThan(order[2]!);
+    // Thinking renders only when not off.
+    expect(line).toContain("thinking medium");
+    const off = textOf(new Header({ managerModel: "gpt-5.5", thinking: "off" }).render(80));
+    expect(off).not.toContain("thinking");
+  });
+
+  test("footer order: hints, then sidekick status", () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      sidekickWorking: 1,
+      sidekickTotal: 2,
+    });
+    const line = textOf(footer.render(80));
+    const hint = line.indexOf("/help");
+    const sidekicks = line.indexOf("1/2 sidekicks running");
+    expect(hint).toBeGreaterThanOrEqual(0);
+    expect(sidekicks).toBeGreaterThan(hint!);
+    // Running replaces hints with cancel/quit + elapsed.
+    const running = new Footer({ managerModel: "gpt-5.5", managerWorking: true });
+    const runningLine = textOf(running.render(80));
+    expect(runningLine).toContain("esc cancel");
+    expect(runningLine).toContain("ctrl+c quit");
+    expect(runningLine).not.toContain("/help");
   });
 });

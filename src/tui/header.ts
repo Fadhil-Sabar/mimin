@@ -1,5 +1,5 @@
-import { TruncatedText, type Component } from "@mariozechner/pi-tui";
-import { cyan, dim, green, yellow } from "./theme.js";
+import { truncateToWidth, visibleWidth, type Component } from "@mariozechner/pi-tui";
+import { cyan, dim } from "./theme.js";
 
 /** Remove terminal controls from text before it reaches a pi-tui component. */
 export function sanitizeText(value: unknown, multiline = true): string {
@@ -14,116 +14,141 @@ export function sanitizeText(value: unknown, multiline = true): string {
   return text;
 }
 
-function compactWorkspace(workspace: string): string {
-  const normalized = sanitizeText(workspace, false).replace(/[\\/]+$/, "");
-  if (!normalized) return ".";
-  const parts = normalized.split(/[\\/]/).filter(Boolean);
-  return parts.at(-1) ?? normalized;
-}
-
 export interface HeaderOptions {
   product?: string;
   managerModel: string;
-  workspace: string;
+  /** Retained for call-site compatibility; not rendered by the compact header. */
+  workspace?: string;
   thinking?: string;
+  /** Presentation metadata: the sidekick's model id (from delegate events). */
+  sidekickModel?: string;
+  /** Presentation metadata: the active manager session id. */
+  sessionId?: string;
 }
 
-/** The manager's run state shown in the header status slot. */
+/** Kept for call-site compatibility; the compact header renders no run state. */
 export type HeaderRunState = "idle" | "running" | "working";
 
-/** Spinner frames shown while the manager is streaming text. */
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const SPINNER_INTERVAL_MS = 100;
+/** One identity segment with its drop priority (lower disappears first). */
+interface Segment {
+  priority: number;
+  text: string;
+}
 
-/** Single-line, narrow-safe application header backed by pi-tui TruncatedText. */
+/** Strip the "manager-"/"sidekick-" role prefix and shorten for the header chip. */
+function compactSession(id: string): string {
+  const text = sanitizeText(id, false).trim();
+  if (!text) return "";
+  const stripped = text.replace(/^(manager|sidekick)-/, "");
+  return stripped.length <= 8 ? stripped : stripped.slice(0, 8);
+}
+
+/**
+ * Compact single-line role identity header:
+ * `mimin · manager <model> · thinking <mode> · sidekick <model> · session <short id>`.
+ * Only the role identity is shown — no workspace, provider, or run state.
+ * Low-priority segments (thinking, then session, then sidekick) are dropped as
+ * the width narrows so the manager model always fits without overflow.
+ */
 export class Header implements Component {
-  private line = new TruncatedText("");
   private product: string;
-  private model: string;
-  private workspace: string;
+  private manager: string;
   private thinking: string;
-  private runState: HeaderRunState = "idle";
-  private turn = 0;
-  private frame = 0;
-  private timer?: Timer;
+  private sidekick?: string;
+  private session?: string;
 
   constructor(options: HeaderOptions) {
     this.product = sanitizeText(options.product ?? "mimin", false) || "mimin";
-    this.model = sanitizeText(options.managerModel, false) || "unknown";
-    this.workspace = compactWorkspace(options.workspace);
+    this.manager = sanitizeText(options.managerModel, false) || "unknown";
     this.thinking = sanitizeText(options.thinking ?? "off", false) || "off";
-    this.refresh();
+    this.sidekick = options.sidekickModel !== undefined
+      ? sanitizeText(options.sidekickModel, false) || undefined
+      : undefined;
+    this.session = options.sessionId !== undefined
+      ? compactSession(options.sessionId) || undefined
+      : undefined;
   }
 
   setManagerModel(model: string): void {
-    this.model = sanitizeText(model, false) || "unknown";
-    this.refresh();
-  }
-
-  setWorkspace(workspace: string): void {
-    this.workspace = compactWorkspace(workspace);
-    this.refresh();
+    this.manager = sanitizeText(model, false) || "unknown";
   }
 
   setThinking(thinking: string): void {
     this.thinking = sanitizeText(thinking, false) || "off";
-    this.refresh();
   }
 
-  /** Set the manager run state; the spinner animates only while streaming. */
-  setRunState(state: HeaderRunState): void {
-    if (this.runState === state) return;
-    this.runState = state;
-    this.frame = 0;
-    this.updateTimer();
-    this.refresh();
+  /** Set the sidekick model chip (hidden when empty). */
+  setSidekickModel(model?: string): void {
+    this.sidekick = model !== undefined
+      ? sanitizeText(model, false) || undefined
+      : undefined;
   }
 
-  /** Set the current manager turn; 0 hides the turn chip. */
-  setTurn(turn: number): void {
-    const next = Math.max(0, Math.floor(turn));
-    if (this.turn === next) return;
-    this.turn = next;
-    this.refresh();
+  /** Set the session chip (hidden when empty). */
+  setSessionId(sessionId?: string): void {
+    this.session = sessionId !== undefined
+      ? compactSession(sessionId) || undefined
+      : undefined;
   }
+
+  // Back-compat no-ops: the compact header has no run state, turn, or workspace.
+
+  /** @deprecated no-op: the header no longer renders run state. */
+  setRunState(_state: HeaderRunState): void {}
+
+  /** @deprecated no-op: the header no longer renders the turn chip. */
+  setTurn(_turn: number): void {}
+
+  /** @deprecated no-op: the header no longer renders the workspace. */
+  setWorkspace(_workspace: string): void {}
 
   invalidate(): void {
-    this.line.invalidate();
+    // Rendering derives directly from the small identity fields.
   }
 
   render(width: number): string[] {
     if (width <= 0) return [""];
-    return this.line.render(width);
+    let segments = this.buildSegments();
+    // Drop the lowest-priority identity segment until the line fits, keeping
+    // at least the product + manager model (priority 4).
+    while (
+      segments.some((segment) => segment.priority < 4)
+      && visibleWidth(segments.map((segment) => segment.text).join("")) > width
+    ) {
+      let drop = 0;
+      for (let index = 1; index < segments.length; index += 1) {
+        if (segments[index]!.priority < segments[drop]!.priority) drop = index;
+      }
+      segments = segments.filter((_, index) => index !== drop);
+    }
+    const line = segments.map((segment) => segment.text).join("");
+    return [truncateToWidth(line, width)];
   }
 
-  private updateTimer(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
+  /** Identity segments in render order with drop priorities. */
+  private buildSegments(): Segment[] {
+    const segments: Segment[] = [
+      { priority: 4, text: cyan(this.product) },
+      { priority: 4, text: ` · ${dim("manager")} ${cyan(this.manager)}` },
+    ];
+    if (this.thinking !== "off" && this.thinking.length > 0) {
+      segments.push({
+        priority: 1,
+        text: ` · ${dim("thinking")} ${dim(this.thinking)}`,
+      });
     }
-    if (this.runState === "running") {
-      this.timer = setInterval(() => {
-        this.frame = (this.frame + 1) % SPINNER_FRAMES.length;
-        this.refresh();
-      }, SPINNER_INTERVAL_MS);
+    if (this.sidekick) {
+      segments.push({
+        priority: 3,
+        text: ` · ${dim("sidekick")} ${cyan(this.sidekick)}`,
+      });
     }
-  }
-
-  private refresh(): void {
-    const status = this.runState === "running"
-      ? cyan(`${SPINNER_FRAMES[this.frame % SPINNER_FRAMES.length]} working`)
-      : this.runState === "working"
-        ? cyan("⚙ working")
-        : dim("idle");
-    const turn = this.turn > 0 ? ` · ${dim(`turn ${this.turn}`)}` : "";
-    const model = cyan(this.model);
-    const thinking = dim(`thinking ${this.thinking}`);
-    const workspace = dim(this.workspace);
-    const product = this.runState === "idle"
-      ? yellow(this.product)
-      : green(this.product);
-    this.line = new TruncatedText(
-      `${product} · ${model} · ${status}${turn} · ${thinking} · ${workspace}`,
-    );
+    if (this.session) {
+      segments.push({
+        priority: 2,
+        text: ` · ${dim("session")} ${dim(this.session)}`,
+      });
+    }
+    return segments;
   }
 }

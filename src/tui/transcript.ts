@@ -10,6 +10,9 @@ import { cyan, dim, green, yellow } from "./theme.js";
 
 export type TranscriptRole = "user" | "manager" | "info" | "error" | "tool";
 
+/** Renderer for a live-updating transcript block; called with the width. */
+export type LiveBlockRenderer = (width: number) => string[];
+
 export interface TranscriptEntry {
   readonly id: string;
   readonly role: TranscriptRole;
@@ -45,7 +48,7 @@ interface MutableEntry {
 
 const HEADINGS: Record<TranscriptRole, string> = {
   user: "You",
-  manager: "Manager",
+  manager: "Mimin",
   info: "Info",
   error: "Error",
   tool: "Tools",
@@ -79,9 +82,9 @@ const THEME: MarkdownTheme = {
 };
 
 /**
- * Transcript with one heading per entry and markdown bodies:
- * - manager: a single `◆ Manager` heading line, markdown rendered beneath;
- * - user: `> text` (no `You:` label);
+ * Transcript with one label per entry and markdown bodies:
+ * - manager: a single `Mimin` label line, markdown rendered beneath;
+ * - user: a distinct `You` label line, plain text rendered beneath;
  * - info/error: `◆ Info`/`◆ Error` heading lines.
  * Streaming mutates the same body component instead of rebuilding history.
  */
@@ -168,17 +171,17 @@ export class Transcript extends Container implements Component {
     const text = sanitizeText(value);
     const group = new Container();
     if (role === "user") {
-      group.addChild(new Text(`${green(">")} ${text}`, 0, 0));
+      // Distinct "You" label line, then the plain text body (no "> text" prefix).
+      group.addChild(new Text(green("You"), 0, 0));
+      group.addChild(new Text(text, 0, 0));
+    } else if (role === "manager") {
+      // Bare "Mimin" label, then the markdown body.
+      group.addChild(new Text(cyan("Mimin"), 0, 0));
+      group.addChild(new Markdown(text, 0, 0, THEME));
     } else {
-      const headingText = role === "manager"
-        ? cyan("◆")
-        : role === "error"
-          ? yellow("◆")
-          : dim("◆");
-      group.addChild(new Text(`${headingText} ${HEADINGS[role]}`, 0, 0));
-      group.addChild(role === "manager"
-        ? new Markdown(text, 0, 0, THEME)
-        : new Text(text, 0, 0));
+      const marker = role === "error" ? yellow("◆") : dim("◆");
+      group.addChild(new Text(`${marker} ${HEADINGS[role]}`, 0, 0));
+      group.addChild(new Text(text, 0, 0));
     }
     const entry: MutableEntry = {
       id,
@@ -205,11 +208,11 @@ export class Transcript extends Container implements Component {
   }
 
   /**
-   * Append a tool-activity block (one per turn) rendered live by the given
-   * renderer. The block updates in place as tool rows change; it never
-   * re-appends a finished row.
+   * Append a live-updating block (one per turn) rendered by the given
+   * renderer. The block updates in place as its rows change; it never
+   * re-appends finished rows. Returns the entry id.
    */
-  appendToolBlock(renderer: (width: number) => string[]): string {
+  appendLiveBlock(renderer: LiveBlockRenderer): string {
     const id = `transcript-${++this.sequence}`;
     const group = new Container();
     const entry: MutableEntry = {
@@ -228,6 +231,15 @@ export class Transcript extends Container implements Component {
     this.addChild(group);
     this.discardOldest();
     return id;
+  }
+
+  /**
+   * Backward-compatible alias for tool-activity blocks; tool rows render
+   * inline in the transcript via {@link appendLiveBlock}.
+   * @deprecated Prefer {@link appendLiveBlock} for non-tool live blocks.
+   */
+  appendToolBlock(renderer: LiveBlockRenderer): string {
+    return this.appendLiveBlock(renderer);
   }
 
   /** Replace a stream with the provider's current cumulative text. */

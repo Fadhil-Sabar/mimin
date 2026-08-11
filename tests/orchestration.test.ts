@@ -558,4 +558,222 @@ describe("commandcode env credential forwarding", () => {
     }
     expect(received?.apiKey).toBeUndefined();
   });
+
+  test("runSidekick uses a stored key for a commandcode sidekick when env is absent", async () => {
+    const { workspace, dataDir } = await fixture();
+    const previous = process.env.COMMANDCODE_API_KEY;
+    delete process.env.COMMANDCODE_API_KEY;
+    let received: Record<string, unknown> | undefined;
+    try {
+      const result = await runSidekick({
+        task: "use the stored key",
+        workspace,
+        config: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
+        dataDir,
+        authKey: "sk-stored-sidekick",
+        modelResolver: () => ({
+          id: "gpt-5.5",
+          name: "Command Code gpt-5.5",
+          api: "openai-completions",
+          provider: "commandcode",
+          baseUrl: "https://api.commandcode.ai/provider/v1",
+          reasoning: true,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128_000,
+          maxTokens: 16_384,
+        }),
+        run: async (options) => {
+          received = options.config as Record<string, unknown>;
+          return {
+            status: "completed",
+            turns: 1,
+            toolCalls: 0,
+            messages: [],
+            finalMessage: {
+              role: "assistant",
+              content: [{ type: "text", text: JSON.stringify({
+                status: "complete",
+                summary: "done",
+                filesChanged: [],
+                verification: [],
+              }) }],
+              api: "openai-completions",
+              provider: "commandcode",
+              model: "gpt-5.5",
+              usage: {
+                input: 1,
+                output: 1,
+                cacheRead: 0,
+                cacheWrite: 0,
+                totalTokens: 2,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+              },
+              stopReason: "stop",
+              timestamp: Date.now(),
+            },
+          };
+        },
+      });
+      expect(result.status).toBe("complete");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COMMANDCODE_API_KEY;
+      } else {
+        process.env.COMMANDCODE_API_KEY = previous;
+      }
+    }
+    // The stored sidekick key reaches the run config without an env var.
+    expect(received?.apiKey).toBe("sk-stored-sidekick");
+  });
+
+  test("createManagerTools forwards sidekickAuthKey into the delegated sidekick run", async () => {
+    const { workspace, dataDir } = await fixture();
+    const previous = process.env.COMMANDCODE_API_KEY;
+    delete process.env.COMMANDCODE_API_KEY;
+    let sidekickConfig: Record<string, unknown> | undefined;
+    const sidekickRun = async (options: {
+      config?: Record<string, unknown>;
+    }) => {
+      sidekickConfig = options.config as Record<string, unknown>;
+      return {
+        status: "completed",
+        turns: 1,
+        toolCalls: 0,
+        messages: [],
+        finalMessage: {
+          role: "assistant",
+          content: [{ type: "text", text: JSON.stringify({
+            status: "complete",
+            summary: "done",
+            filesChanged: [],
+            verification: [],
+          }) }],
+          api: "openai-completions",
+          provider: "commandcode",
+          model: "gpt-5.5",
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        },
+      };
+    };
+    try {
+      const managerTools = createManagerTools({
+        workspace,
+        config: {
+          dataDir,
+          manager: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
+          sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
+          memory: { auto: true },
+        },
+        sidekickAuthKey: "sk-sidekick-only",
+        sidekickRun: sidekickRun as never,
+      });
+      const delegateTool = managerTools.find((tool) => tool.name === "delegate");
+      expect(delegateTool).toBeDefined();
+      // Drive the delegate tool so the runner calls runSidekick with authKey.
+      await (delegateTool!.execute as (
+        args: Record<string, unknown>,
+        context: ToolExecutionContext,
+      ) => Promise<unknown>)(
+        { task: "use the stored key" },
+        {
+          model: {} as never,
+          turn: 1,
+          toolCall: {} as never,
+        } as ToolExecutionContext,
+      );
+      expect(sidekickConfig?.apiKey).toBe("sk-sidekick-only");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COMMANDCODE_API_KEY;
+      } else {
+        process.env.COMMANDCODE_API_KEY = previous;
+      }
+    }
+  });
+
+  test("createManagerTools forwards only the sidekick's own key (provider isolation)", async () => {
+    const { workspace, dataDir } = await fixture();
+    const previous = process.env.COMMANDCODE_API_KEY;
+    delete process.env.COMMANDCODE_API_KEY;
+    let sidekickConfig: Record<string, unknown> | undefined;
+    const sidekickRun = async (options: {
+      config?: Record<string, unknown>;
+    }) => {
+      sidekickConfig = options.config as Record<string, unknown>;
+      return {
+        status: "completed",
+        turns: 1,
+        toolCalls: 0,
+        messages: [],
+        finalMessage: {
+          role: "assistant",
+          content: [{ type: "text", text: JSON.stringify({
+            status: "complete",
+            summary: "done",
+            filesChanged: [],
+            verification: [],
+          }) }],
+          api: "openai-completions",
+          provider: "commandcode",
+          model: "gpt-5.5",
+          usage: {
+            input: 1,
+            output: 1,
+            cacheRead: 0,
+            cacheWrite: 0,
+            totalTokens: 2,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+          },
+          stopReason: "stop",
+          timestamp: Date.now(),
+        },
+      };
+    };
+    try {
+      const managerTools = createManagerTools({
+        workspace,
+        config: {
+          dataDir,
+          manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
+          sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
+          memory: { auto: true },
+        },
+        // The tools layer only ever forwards the sidekick's own key; the
+        // manager's key never enters this path (it lives on runManager).
+        sidekickAuthKey: "sk-sidekick-key",
+        sidekickRun: sidekickRun as never,
+      });
+      const delegateTool = managerTools.find((tool) => tool.name === "delegate");
+      expect(delegateTool).toBeDefined();
+      await (delegateTool!.execute as (
+        args: Record<string, unknown>,
+        context: ToolExecutionContext,
+      ) => Promise<unknown>)(
+        { task: "isolate keys" },
+        {
+          model: {} as never,
+          turn: 1,
+          toolCall: {} as never,
+        } as ToolExecutionContext,
+      );
+      // The sidekick receives ONLY its own stored key, never the manager's.
+      expect(sidekickConfig?.apiKey).toBe("sk-sidekick-key");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COMMANDCODE_API_KEY;
+      } else {
+        process.env.COMMANDCODE_API_KEY = previous;
+      }
+    }
+  });
 });

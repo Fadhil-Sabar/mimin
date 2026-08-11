@@ -47,6 +47,9 @@ export interface CreateManagerToolsOptions {
   sidekickRun?: SidekickRunFunction;
   sidekickSystemPrompt?: string;
   sidekickRunConfig?: Omit<AgentRunConfig, "thinking">;
+  /** Provider API key for the delegated sidekick, resolved separately from the
+   *  manager's (never the manager's key). Env still wins inside runSidekick. */
+  sidekickAuthKey?: string;
   sidekickRunner?: SidekickRunner;
   maxDelegationConcurrency?: number;
   onDelegateEvent?: DelegateEventCallback;
@@ -73,6 +76,9 @@ export function createManagerTools(
       systemPrompt: options.sidekickSystemPrompt,
       runConfig: options.sidekickRunConfig,
       managerRole: options.config.manager,
+      ...(options.sidekickAuthKey !== undefined
+        ? { authKey: options.sidekickAuthKey }
+        : {}),
     },
     run: options.sidekickRunner,
     maxConcurrency: options.maxDelegationConcurrency,
@@ -157,6 +163,7 @@ export async function runManager(
       sidekickSystemPrompt: options.sidekickSystemPrompt,
       sidekickRunConfig: options.sidekickRunConfig,
       sidekickRunner: options.sidekickRunner,
+      sidekickAuthKey: options.sidekickAuthKey,
       maxDelegationConcurrency: options.maxDelegationConcurrency,
       onDelegateEvent: options.onDelegateEvent,
       memoryStore: options.memoryStore,

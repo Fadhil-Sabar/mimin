@@ -54,7 +54,16 @@ export interface CliTui {
   addManager(text: string): string;
   handleManagerEvent(event: LocalManagerEvent): void;
   handleDelegateEvent(event: LocalDelegateEvent): void;
-  setStatus(update: { context?: ContextSummary; turn?: number; managerModel?: string }): void;
+  setStatus(update: {
+    context?: ContextSummary;
+    turn?: number;
+    /** Bare manager model id (no provider prefix). */
+    managerModel?: string;
+    /** Bare sidekick model id (no provider prefix). */
+    sidekickModel?: string;
+    /** Active manager session id (header chip). */
+    sessionId?: string;
+  }): void;
   /** Flip the header/footer run indicator immediately on submit/cancel. */
   setRunning(running: boolean): void;
   /** Clear the editor's draft input (idle Escape). */
@@ -522,11 +531,17 @@ async function runDirect(
   process.once("SIGINT", interrupt);
   try {
     let authKey: string | undefined;
+    let sidekickAuthKey: string | undefined;
     if (auth) {
       try {
         authKey = await auth.effectiveKey(config.manager.provider, COMMANDCODE_API_KEY_ENV_VAR);
       } catch {
         authKey = undefined;
+      }
+      try {
+        sidekickAuthKey = await auth.effectiveKey(config.sidekick.provider, COMMANDCODE_API_KEY_ENV_VAR);
+      } catch {
+        sidekickAuthKey = undefined;
       }
     }
     const result = await manager({
@@ -536,6 +551,7 @@ async function runDirect(
       sessionStore: store,
       ...(sessionId ? { sessionId } : {}),
       ...(authKey ? { authKey } : {}),
+      ...(sidekickAuthKey ? { sidekickAuthKey } : {}),
       signal: controller.signal,
       onEvent: (event) => {
         if (event.type === "model_event" && event.event.type === "text_delta") {
@@ -620,7 +636,9 @@ async function runInteractive(
   };
 
   app = createTui({
-    managerModel: `${config.manager.provider}/${config.manager.model}`,
+    managerModel: config.manager.model,
+    sidekickModel: config.sidekick.model,
+    sessionId,
     workspace,
     thinking: config.manager.thinking,
     roleProviders: (role) => runtimeProvider(runtime, role),
@@ -661,7 +679,8 @@ async function runInteractive(
         showError: (text) => { app?.addError(text); },
         refreshTui: () => {
           app?.setStatus({
-            managerModel: `${runtime.manager.provider}/${runtime.manager.model}`,
+            managerModel: runtime.manager.model,
+            sidekickModel: runtime.sidekick.model,
           });
         },
         suggestModels: suggestModelsSource,
@@ -686,6 +705,7 @@ async function runInteractive(
               }
             }
             sessionId = id;
+            app?.setStatus({ sessionId });
             app?.restoreSession(entries);
             return id;
           } catch {
@@ -704,8 +724,10 @@ async function runInteractive(
       let receivedManagerText = false;
       let completed = false;
       let authKey: string | undefined;
+      let sidekickAuthKey: string | undefined;
       try {
         const managerProvider = runtimeProvider(runtime, "manager");
+        const sidekickProvider = runtimeProvider(runtime, "sidekick");
         if (auth) {
           try {
             authKey = await auth.effectiveKey(
@@ -715,6 +737,14 @@ async function runInteractive(
           } catch {
             authKey = undefined;
           }
+          try {
+            sidekickAuthKey = await auth.effectiveKey(
+              sidekickProvider,
+              COMMANDCODE_API_KEY_ENV_VAR,
+            );
+          } catch {
+            sidekickAuthKey = undefined;
+          }
         }
         const result = await manager({
           input: line,
@@ -723,6 +753,7 @@ async function runInteractive(
           sessionStore: store,
           sessionId,
           ...(authKey ? { authKey } : {}),
+          ...(sidekickAuthKey ? { sidekickAuthKey } : {}),
           signal: controller.signal,
           onEvent: (event: AgentEvent) => {
             app?.handleManagerEvent(event);
@@ -743,6 +774,7 @@ async function runInteractive(
           onDelegateEvent: (event) => app?.handleDelegateEvent(event),
         });
         sessionId = result.sessionId;
+        app?.setStatus({ sessionId });
         completed = result.status === "completed";
         if (result.status === "max_turns") {
           if (result.finalText && !receivedManagerText) {

@@ -6,6 +6,7 @@ import { sanitizeText } from "./header.js";
 import { cyan, dim, green, yellow } from "./theme.js";
 
 export type SidekickCardStatus =
+  | "queued"
   | "running"
   | "complete"
   | "partial"
@@ -85,6 +86,8 @@ interface SafeToolActivity {
 }
 
 interface SidekickCard {
+  /** Stable unique card id; survives index reuse. */
+  id: string;
   index: number;
   taskCount: number;
   sessionId?: string;
@@ -105,6 +108,16 @@ interface SidekickCard {
 
 /** Number of cards shown when every running card is collapsed. */
 export const MAX_VISIBLE_RUNNING_CARDS = 5;
+
+/** Maximum number of activity rows retained per card. */
+const MAX_ACTIVITIES_PER_CARD = 3;
+
+const CARD_ID_SEQUENCE = { value: 0 };
+/** Stable unique card id; never reused, independent of delegation index. */
+function nextCardId(): string {
+  CARD_ID_SEQUENCE.value += 1;
+  return `card-${CARD_ID_SEQUENCE.value}`;
+}
 
 function compact(value: unknown, limit: number): string {
   const text = sanitizeText(value, false).trim();
@@ -139,6 +152,7 @@ function normalizePath(value: unknown, workspace: string): string | undefined {
 /** Privacy-preserving sidekick cards. Only whitelisted lifecycle fields are retained. */
 export class SidekickActivity implements Component {
   private readonly cards: SidekickCard[] = [];
+  private readonly byCardId = new Map<string, SidekickCard>();
   private readonly latestByIndex = new Map<number, SidekickCard>();
   private readonly sessions = new Map<string, SidekickCard>();
   private order = 0;
@@ -152,33 +166,42 @@ export class SidekickActivity implements Component {
     // Rendering is derived directly from the small whitelisted card state.
   }
 
-  apply(event: LocalDelegateEvent): void {
-    if (!Number.isSafeInteger(event.index) || event.index < 0) return;
+  apply(event: LocalDelegateEvent): string | undefined {
+    if (!Number.isSafeInteger(event.index) || event.index < 0) return undefined;
     if (event.type === "delegation_started") {
-      this.start(event.index, event.taskCount, event.task, event.model);
-      return;
+      return this.start(event.index, event.taskCount, event.task, event.model);
     }
     if (event.type === "sidekick_activity") {
-      this.activity(event.index, event.taskCount, event.activity);
-      return;
+      return this.activity(event.index, event.taskCount, event.activity);
     }
-    this.finish(event.index, event.taskCount, event.result, event.task, event.model);
+    return this.finish(event.index, event.taskCount, event.result, event.task, event.model);
   }
 
-  start(index: number, taskCount = 1, task?: string, model?: string): void {
+  /** Render exactly one card by its stable id; undefined when unknown. */
+  rendererFor(cardId: string): (width: number) => string[] {
+    const card = this.byCardId.get(cardId);
+    return (width: number) => (card ? renderCard(card, width) : []);
+  }
+
+  start(index: number, taskCount = 1, task?: string, model?: string): string {
     // Delegation indices restart for later manager tool calls. Keep completed
     // session cards and make the newest card the index target.
     const current = this.latestByIndex.get(index);
-    if (current?.status === "running" && !current.sessionId && current.activities.length === 0) {
+    if (
+      current &&
+      (current.status === "queued" || current.status === "running") &&
+      !current.sessionId &&
+      current.activities.length === 0
+    ) {
       current.taskCount = Math.max(1, taskCount);
       if (task !== undefined) current.task = task;
       if (model !== undefined) current.model = model;
-      return;
+      return current.id;
     }
-    this.create(index, taskCount, task, model);
+    return this.create(index, taskCount, task, model).id;
   }
 
-  activity(index: number, taskCount: number, event: LocalSidekickActivity): void {
+  activity(index: number, taskCount: number, event: LocalSidekickActivity): string {
     const card = this.latestByIndex.get(index) ?? this.create(index, taskCount);
     const sessionId = compact(event.sessionId, 80);
     if (sessionId) {
@@ -192,13 +215,17 @@ export class SidekickActivity implements Component {
         card.startedAt = event.timestamp;
       }
     } else if (event.type === "tool_started") {
+      card.status = "running";
       card.activities.push({
-        tool: compact(event.tool, 48) || "tool",
+        tool: (compact(event.tool, 48) || "tool").toLowerCase(),
         detail: event.detail !== undefined ? compact(event.detail, 48) : undefined,
         status: "running",
       });
+      if (card.activities.length > MAX_ACTIVITIES_PER_CARD) {
+        card.activities.splice(0, card.activities.length - MAX_ACTIVITIES_PER_CARD);
+      }
     } else if (event.type === "tool_finished") {
-      const tool = compact(event.tool, 48) || "tool";
+      const tool = (compact(event.tool, 48) || "tool").toLowerCase();
       const pending = [...card.activities]
         .reverse()
         .find((item) => item.tool === tool && item.status === "running");
@@ -207,10 +234,16 @@ export class SidekickActivity implements Component {
       if (event.detail !== undefined) update.detail = compact(event.detail, 48);
       const path = normalizePath(event.path, this.workspace);
       if (path) update.path = path;
-      if (!pending) card.activities.push(update);
+      if (!pending) {
+        card.activities.push(update);
+        if (card.activities.length > MAX_ACTIVITIES_PER_CARD) {
+          card.activities.splice(0, card.activities.length - MAX_ACTIVITIES_PER_CARD);
+        }
+      }
     } else {
       card.status = status(event.status);
     }
+    return card.id;
   }
 
   finish(
@@ -219,7 +252,7 @@ export class SidekickActivity implements Component {
     result: LocalSidekickResult,
     task?: string,
     model?: string,
-  ): void {
+  ): string {
     const card = this.latestByIndex.get(index) ?? this.create(index, taskCount);
     card.status = status(result.status);
     card.summary = compact(result.summary, 180);
@@ -241,6 +274,7 @@ export class SidekickActivity implements Component {
       card.sessionId = sessionId;
       this.sessions.set(sessionId, card);
     }
+    return card.id;
   }
 
   toggle(identifier: number | string): boolean {
@@ -260,15 +294,31 @@ export class SidekickActivity implements Component {
     );
   }
 
+  /** Size of the active delegation: max taskCount among queued/running cards, 0 when idle. */
+  totalCount(): number {
+    return this.cards.reduce((max, card) => {
+      if (card.status !== "queued" && card.status !== "running") return max;
+      return Math.max(max, Math.max(1, card.taskCount));
+    }, 0);
+  }
+
+  /** Drop every card (session restore). */
+  clear(): void {
+    this.cards.length = 0;
+    this.byCardId.clear();
+    this.latestByIndex.clear();
+    this.sessions.clear();
+    this.order = 0;
+  }
+
   render(width: number): string[] {
     if (width <= 0) return this.cards.length > 0 ? [""] : [];
-    const now = this.now();
     const ordered = [...this.cards].sort((a, b) => a.order - b.order);
     const lines: string[] = [];
     let rendered = 0;
     for (const card of ordered) {
       if (card.status === "running" && rendered >= MAX_VISIBLE_RUNNING_CARDS) break;
-      lines.push(...renderCard(card, width, now));
+      lines.push(...renderCard(card, width));
       rendered += 1;
     }
     const queued = ordered.length - rendered;
@@ -279,9 +329,10 @@ export class SidekickActivity implements Component {
 
   private create(index: number, taskCount: number, task?: string, model?: string): SidekickCard {
     const card: SidekickCard = {
+      id: nextCardId(),
       index,
       taskCount: Math.max(1, taskCount),
-      status: "running",
+      status: "queued",
       expanded: false,
       activities: [],
       order: ++this.order,
@@ -289,45 +340,10 @@ export class SidekickActivity implements Component {
     if (task !== undefined) card.task = task;
     if (model !== undefined) card.model = model;
     this.cards.push(card);
+    this.byCardId.set(card.id, card);
     this.latestByIndex.set(index, card);
     return card;
   }
-}
-
-function elapsedSeconds(card: SidekickCard, now: number): number | undefined {
-  const end = card.finishedAt ?? (card.status === "running" ? now : undefined);
-  const start = card.startedAt;
-  if (start === undefined || end === undefined || end < start) return undefined;
-  return Math.max(0, Math.round((end - start) / 1000));
-}
-
-function durationText(seconds: number | undefined): string {
-  if (seconds === undefined) return "";
-  if (seconds < 60) return `${seconds}s`;
-  return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
-}
-
-/** Elapsed label while running (no start timestamp yet: "…"). */
-function liveElapsed(card: SidekickCard, now: number): string {
-  if (card.startedAt === undefined) return "…";
-  return durationText(elapsedSeconds(card, now));
-}
-
-/** Compact "waiting" badge for sidekicks queued behind the running ones. */
-function queuedBadge(count: number): string {
-  return count > 0 ? dim(`┌ ${count} waiting`) : "";
-}
-
-/** Live activity label while a sidekick is running. */
-function liveActivity(card: SidekickCard): string | undefined {
-  if (card.status !== "running") return undefined;
-  const current = card.activities.find((item) => item.status === "running");
-  if (!current) return undefined;
-  const detail = current.detail ? ` ${current.detail}` : "";
-  if (current.tool === "edit") return `Editing${detail}`;
-  if (current.tool === "read") return `Reading${detail}`;
-  if (current.tool === "bash" || current.tool === "verification") return `Running${detail}`;
-  return (current.tool[0]?.toUpperCase() + current.tool.slice(1)) + detail;
 }
 
 /** Concise metrics row for a completed card, derived from whitelisted fields. */
@@ -341,64 +357,111 @@ function metricsText(card: SidekickCard): string | undefined {
   return parts.length > 0 ? parts.join(" · ") : undefined;
 }
 
-/** Summary row for a completed card even when collapsed (a "docked" status). */
-function summaryText(card: SidekickCard, now: number): string {
-  const elapsed = elapsedSeconds(card, now);
-  const duration = elapsed !== undefined ? ` · ${durationText(elapsed)}` : "";
-  const metrics = metricsText(card);
-  if (metrics) return `${summaryStatus(card)}${duration} · ${metrics}`;
-  return `${summaryStatus(card)}${duration}`;
+/** Colored status label; reused for both box header and docked summary. */
+function coloredStatus(card: SidekickCard): string {
+  if (card.status === "queued") return dim("○ queued");
+  if (card.status === "running") return cyan("● running");
+  if (card.status === "complete") return green("✓ done");
+  if (card.status === "partial") return dim("× partial");
+  if (card.status === "needs_decision") return yellow("× decision");
+  return yellow("× failed");
 }
 
-/** Colored docked status label ("Complete" green, "Failed" yellow, others dim). */
-function summaryStatus(card: SidekickCard): string {
-  if (card.status === "complete") return green("Complete");
-  if (card.status === "partial") return dim("Partial");
-  if (card.status === "needs_decision") return yellow("Needs decision");
-  return yellow("Failed");
+/** Compact "waiting" badge for sidekicks queued behind the running ones. */
+function queuedBadge(count: number): string {
+  return count > 0 ? dim(`└ ${count} waiting`) : "";
 }
 
-function statusVerb(card: SidekickCard): string {
-  if (card.status === "running") return cyan("Working");
-  if (card.status === "complete") return green("Complete");
-  if (card.status === "partial") return dim("Partial");
-  if (card.status === "needs_decision") return yellow("Needs decision");
-  return yellow("Failed");
+/** One compact activity row: plain lowercase "tool path-or-detail". */
+function activityRow(activity: SafeToolActivity): string {
+  const suffix = activity.path
+    ? ` ${activity.path}`
+    : activity.detail
+      ? ` ${activity.detail}`
+      : "";
+  return `${activity.tool}${suffix}`;
 }
 
-function renderCard(card: SidekickCard, width: number, now: number): string[] {
-  const inner = Math.max(1, width - 2);
-  const label = card.taskCount > 1 ? `Sidekick #${card.index + 1}` : "Sidekick";
-  const header = card.model
-    ? `${label} · ${dim(compact(card.model, 40))}`
-    : label;
+/** Pad a string to exactly `inner` visible columns (right side). */
+function padTo(text: string, inner: number): string {
+  return `${text}${" ".repeat(Math.max(0, inner - visibleWidth(text)))}`;
+}
+
+/** Bounded card box; collapses to plain rows when the width is too narrow. */
+function renderCard(card: SidekickCard, width: number): string[] {
+  const inner = Math.max(1, width - 4);
+  const label = `sidekick #${card.index + 1}`;
+  const status = coloredStatus(card);
   const lines: string[] = [];
-  lines.push(`${dim("┌")} ${header}`);
-  if (card.task) lines.push(`${dim("│")} ${compact(card.task, inner - 2)}`);
-  if (card.status === "running") {
-    const activity = liveActivity(card);
-    const elapsed = dim(liveElapsed(card, now));
-    lines.push(`${dim("│")} ${green("●")} ${activity ?? cyan("Running")} · ${elapsed}`);
-  } else {
-    const mark = card.status === "complete" ? green("✓") : yellow("✗");
-    lines.push(`${dim("│")} ${mark} ${summaryText(card, now)}`);
-    if (card.summary) lines.push(`${dim("│")} ${compact(card.summary, inner - 2)}`);
-    if (card.expanded) {
-      for (const file of card.filesChanged ?? []) {
-        lines.push(`${dim("│")}   ${file}`);
-      }
-      for (const entry of card.verification ?? []) {
-        const status = entry.status === "passed" ? green(entry.status) : yellow(entry.status);
-        lines.push(`${dim("│")}   ${entry.command} [${status}]`);
-      }
-      for (const activity of card.activities) {
-        const path = activity.path ? ` · ${activity.path}` : "";
-        lines.push(`${dim("│")}   ${activity.tool}${path}`);
-      }
+  // Narrow mode: no box borders, one status row, then recent activity rows.
+  if (inner < 24) {
+    const headerLine = `${label} · ${compact(card.task, Math.max(1, inner - label.length - 2))}`;
+    const body = [
+      headerLine,
+      status,
+      ...(card.status !== "queued" && card.status !== "running" && card.summary
+        ? [compact(card.summary, Math.max(1, inner))]
+        : []),
+      ...card.activities.slice(-MAX_ACTIVITIES_PER_CARD).map(activityRow),
+      ...(card.expanded ? expandedRows(card, Math.max(1, inner)) : []),
+      "─",
+    ];
+    return body.map((line) => truncateToWidth(line, width));
+  }
+  // Normal width: bounded box with a right-aligned status in the header.
+  // Template: `┌─ ` (3) + header + ` ─ ` (3) + status + ` ┐` (2) = width.
+  // Fixed chrome = 8, so headerBudget = width - 8 - statusLen.
+  const statusText = stripAnsi(status);
+  const headerBudget = Math.max(1, width - 8 - statusText.length);
+  const header = `${label} · ${compact(card.task, Math.max(1, headerBudget - label.length - 3))}`;
+  lines.push(`┌─ ${padTo(header, headerBudget)} ─ ${status} ┐`);
+  const statusRow = card.status === "queued"
+    ? "waiting for turn"
+    : card.status === "running"
+      ? "running"
+      : metricsText(card) ?? "";
+  lines.push(`│ ${padTo(statusRow, inner)} │`);
+  // Completed/failed cards also surface the safe result summary on one row.
+  if (
+    card.status !== "queued" &&
+    card.status !== "running" &&
+    card.summary
+  ) {
+    lines.push(`│ ${padTo(compact(card.summary, inner), inner)} │`);
+  }
+  for (const activity of card.activities.slice(-MAX_ACTIVITIES_PER_CARD)) {
+    lines.push(`│ ${padTo(activityRow(activity), inner)} │`);
+  }
+  // Expanded cards surface changed files and verification results, bounded.
+  if (card.expanded) {
+    for (const row of expandedRows(card, inner)) {
+      lines.push(`│ ${padTo(row, inner)} │`);
     }
   }
-  const footer = card.taskCount > 1 ? `${card.index + 1}/${card.taskCount}` : "";
-  lines.push(`${dim("└")} ${footer}`.trimEnd());
-  // Truncate each line to the available width and keep box borders.
+  lines.push(`└${"─".repeat(inner + 2)}┘`);
   return lines.map((line) => truncateToWidth(line, width));
+}
+
+/** Safe detail rows for an expanded card: changed files + verification. */
+function expandedRows(card: SidekickCard, limit: number): string[] {
+  const rows: string[] = [];
+  for (const file of card.filesChanged ?? []) {
+    rows.push(compact(file, limit));
+  }
+  for (const entry of card.verification ?? []) {
+    const result = entry.status === "passed" ? green(entry.status) : yellow(entry.status);
+    rows.push(`${compact(entry.command, Math.max(1, limit - 3))} [${result}]`);
+  }
+  return rows;
+}
+
+/** Strip ANSI SGR escapes to compute the visible width of a styled string. */
+function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  return text.replace(/\u001b\[[0-9;]*m/g, "");
+}
+
+/** Visible (ANSI-free) length of a styled string. */
+function visibleWidth(text: string): number {
+  return stripAnsi(text).length;
 }

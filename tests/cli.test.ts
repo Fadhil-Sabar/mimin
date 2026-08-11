@@ -169,6 +169,45 @@ describe("CLI argument and noninteractive paths", () => {
     expect(io.err).not.toContain("sidekick-safe");
   });
 
+  test("direct flow resolves a stored commandcode sidekick key separately (no env)", async () => {
+    const { workspace } = await fixture();
+    const config: AgentConfig = {
+      dataDir: join(workspace, "data"),
+      manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
+      sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
+      memory: { auto: true },
+    };
+    const io = captureIo();
+    const previous = process.env.COMMANDCODE_API_KEY;
+    delete process.env.COMMANDCODE_API_KEY;
+    let received: RunManagerOptions | undefined;
+    // Store the sidekick key BEFORE runCli so the read is not racing the write.
+    const auth = new AuthStore({ dataDir: config.dataDir, env: {} });
+    await auth.setKey("commandcode", "sk-stored-sidekick");
+    try {
+      const code = await runCli(["delegate to commandcode sidekick"], {
+        cwd: workspace,
+        io,
+        loadConfig: async () => config,
+        createAuthStore: () => auth,
+        runManager: async (options) => {
+          received = options;
+          return completed(options.sessionId ?? "missing");
+        },
+      });
+      expect(code).toBe(0);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COMMANDCODE_API_KEY;
+      } else {
+        process.env.COMMANDCODE_API_KEY = previous;
+      }
+    }
+    // The sidekick receives its OWN stored key; the manager never gets it.
+    expect(received?.sidekickAuthKey).toBe("sk-stored-sidekick");
+    expect(received?.authKey).toBeUndefined();
+  });
+
   test("direct max_turns keeps partial text and reports a limit", async () => {
     const { workspace, config } = await fixture();
     const io = captureIo();
@@ -296,6 +335,50 @@ describe("interactive integration", () => {
     expect(fakeTui?.info).toContain("partial interactive answer");
     expect(fakeTui?.info.some((text) => text.includes("reached max_turns"))).toBe(true);
     expect(fakeTui?.errors).toHaveLength(0);
+  });
+
+  test("interactive flow passes a stored commandcode sidekick key, never the manager's", async () => {
+    const { workspace } = await fixture();
+    const config: AgentConfig = {
+      dataDir: join(workspace, "data"),
+      manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
+      sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
+      memory: { auto: true },
+    };
+    const previous = process.env.COMMANDCODE_API_KEY;
+    delete process.env.COMMANDCODE_API_KEY;
+    // Store the sidekick key BEFORE the run so the read never races the write.
+    const auth = new AuthStore({ dataDir: config.dataDir, env: {} });
+    await auth.setKey("commandcode", "sk-stored-sidekick");
+    let received: RunManagerOptions | undefined;
+    try {
+      const code = await runCli([], {
+        cwd: workspace,
+        io: captureIo(),
+        loadConfig: async () => config,
+        createAuthStore: () => auth,
+        runManager: async (options) => {
+          received = options;
+          return completed(options.sessionId ?? "missing");
+        },
+        createTui: (options) => {
+          return new FakeTui(options, async (callbacks) => {
+            await callbacks.onSubmit?.("delegate to commandcode sidekick");
+            await callbacks.onExit?.();
+          });
+        },
+      });
+      expect(code).toBe(0);
+    } finally {
+      if (previous === undefined) {
+        delete process.env.COMMANDCODE_API_KEY;
+      } else {
+        process.env.COMMANDCODE_API_KEY = previous;
+      }
+    }
+    // The manager (built-in) receives no key; the sidekick gets its own stored key.
+    expect(received?.sidekickAuthKey).toBe("sk-stored-sidekick");
+    expect(received?.authKey).toBeUndefined();
   });
 
   test("/provider autocomplete is wired through the TUI by default", async () => {

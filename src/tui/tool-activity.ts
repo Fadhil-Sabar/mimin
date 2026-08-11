@@ -26,30 +26,43 @@ interface ToolRow {
   turn: number;
   /** Safe detail parsed from tool_start arguments (path/command). */
   detail?: string;
+  /** Start arguments retained privately for derived summaries (+/- lines). */
+  args?: Record<string, unknown>;
+  /** Original tool result retained for future detail views; never rendered. */
+  resultData?: unknown;
   /** Compact error message shown on failure (name stripped, sanitized). */
   error?: string;
-  /** Short safe summary for verification successes (e.g. "81 tests passed"). */
+  /** Safe success summary ("81 passed", "2 checks passed"). */
   summary?: string;
+  /** Added/removed line counts for successful edit rows (+added -removed). */
+  diff?: { added: number; removed: number };
+  /** Exit code for bash/verification failures when exposed (details/text). */
+  exitCode?: number;
 }
 
 /** Tools represented by sidekick cards; their rows are suppressed. */
 const CARD_REPRESENTED = new Set(["delegate"]);
 
-/** Title-case labels aligned to the widest label for a compact column. */
+/** Lowercase labels aligned to the widest label for a compact column. */
 const LABELS: Record<string, string> = {
-  read: "Read",
-  edit: "Edit",
-  bash: "Bash",
-  memory_search: "Memory",
-  session_search: "History",
-  verification: "Verify",
-  delegate: "Delegate",
+  read: "read",
+  edit: "edit",
+  bash: "bash",
+  memory_search: "search",
+  session_search: "search",
+  verification: "verify",
 };
 
-const LABEL_WIDTH = 7;
+const LABEL_WIDTH = 6;
 
 /** Strip a `Tool "name" failed:`-style prefix, the name is already shown. */
 const ERROR_PREFIX = /^Tool\s+"[^"]*"\s+failed:\s*/;
+
+/** Match a test-count summary: "81 pass", "81 passed", "81 tests passed". */
+const TEST_COUNT = /(\d{1,6})\s+(?:tests?\s+)?pass(?:ed|es)?/i;
+
+/** Match a bash-style "exitCode: N" prefix in the tool result text. */
+const EXIT_CODE_TEXT = /exitCode:\s*(-?\d+)/i;
 
 function nameOf(value: unknown): string {
   return sanitizeText(value, false).trim() || "tool";
@@ -62,8 +75,7 @@ function record(value: unknown): Record<string, unknown> | undefined {
 }
 
 function labelOf(name: string): string {
-  const fallback = name[0]?.toUpperCase() + name.slice(1);
-  return LABELS[name] ?? (fallback || name);
+  return LABELS[name] ?? name.toLowerCase();
 }
 
 /** Parse a safe argument detail at tool_start: path for read/edit, command for bash. */
@@ -93,10 +105,40 @@ const VERIFY_COMMAND: Record<string, string> = {
 };
 
 /**
- * Short safe verification summary built from the whitelisted result details:
- * each command's ok flag and exit code. Only counts are shown, never output.
+ * Meaningful line count of a text value (non-empty lines, capped). Used to
+ * derive the +/- diff of a successful edit from its start arguments.
  */
-function verificationSummary(details: unknown): string | undefined {
+function lineCount(value: unknown): number {
+  if (typeof value !== "string") return 0;
+  const lines = value.replace(/\r\n?/g, "\n").split("\n");
+  const meaningful = lines.filter((line) => line.trim().length > 0).length;
+  return Math.min(meaningful, 999);
+}
+
+/** Derive the +/- diff for a successful edit from its retained start args. */
+function editDiff(args: Record<string, unknown> | undefined): { added: number; removed: number } | undefined {
+  if (!args) return undefined;
+  const added = lineCount(args.newText);
+  const removed = lineCount(args.oldText);
+  if (added === 0 && removed === 0) return undefined;
+  return { added, removed };
+}
+
+/** Extract a safe test-count summary from output text ("81 pass" -> "81 passed"). */
+function testCount(raw: unknown): string | undefined {
+  const text = sanitizeText(raw, false).trim();
+  const match = TEST_COUNT.exec(text);
+  if (!match || match[1] === undefined) return undefined;
+  const count = Number(match[1]);
+  if (!Number.isSafeInteger(count) || count < 0) return undefined;
+  return `${count} passed`;
+}
+
+/**
+ * Short safe verification summary built from the whitelisted result details:
+ * each command's ok flag. Only counts are shown, never output.
+ */
+function verificationChecks(details: unknown): string | undefined {
   const object = record(details);
   const results = object?.results;
   if (!Array.isArray(results)) return undefined;
@@ -106,16 +148,33 @@ function verificationSummary(details: unknown): string | undefined {
   const failed = entries.length - passed;
   const ok = entries.every((entry) => entry.ok === true);
   if (ok) return entries.length === 1 ? "passed" : `${passed} checks passed`;
-  return failed === entries.length
-    ? "failed"
-    : `${passed}/${entries.length} checks passed`;
+  return failed === entries.length ? "failed" : `${passed}/${entries.length} checks passed`;
+}
+
+/** Extract the exit code exposed by details.exitCode or "exitCode: N" text. */
+function exitCodeOf(result: Record<string, unknown> | undefined): number | undefined {
+  const details = record(result?.details);
+  const raw = details?.exitCode;
+  if (typeof raw === "number" && Number.isSafeInteger(raw)) return raw;
+  const text = sanitizeText(result?.text, false);
+  const match = EXIT_CODE_TEXT.exec(text);
+  if (match?.[1] !== undefined) {
+    const code = Number(match[1]);
+    if (Number.isSafeInteger(code)) return code;
+  }
+  return undefined;
 }
 
 function compactError(raw: unknown): string | undefined {
   const text = sanitizeText(raw, false).trim();
   if (!text) return undefined;
-  // "Tool "read" failed: Path "src" is not a regular file" -> "Path …"
-  const stripped = text.replace(ERROR_PREFIX, "");
+  // "Tool "read" failed: Path "src" is not a regular file" -> "Path …";
+  // also drop a trailing "exitCode: N" / "stdout:" / "stderr:" preamble
+  // (the exit code is already shown inline as `exit N`).
+  const stripped = text
+    .replace(ERROR_PREFIX, "")
+    .replace(/^exitCode:\s*\d+\s*\n?/, "")
+    .replace(/^(?:stdout|stderr):\s*\n?/, "");
   return compact(stripped || text, 60);
 }
 
@@ -125,12 +184,15 @@ function compact(value: unknown, limit: number): string {
 }
 
 /**
- * Compact tool rows for the manager run, styled as an activity stream:
- * pending/running/completed/failed states with status glyphs, title-case
- * labels in a stable column, dim completed routine work, a short error line
- * under failed rows, and a safe one-line summary for verification successes.
- * Raw stdout/transcripts never reach the UI. Delegate is represented by its
- * sidekick card, so its row is suppressed.
+ * Compact manager tool rows, styled as an inline activity stream:
+ * lowercase aligned labels in a stable column, pending/running/completed/
+ * failed states with status glyphs, safe path/command detail, dim routine
+ * completions, a short error line under failed rows, an `exit N` marker on
+ * bash/verification failures when an exit code is exposed, a safe test-count
+ * summary on bash/verification successes, and `+added -removed` on successful
+ * edits. Raw stdout/transcripts and the original tool result never reach the
+ * UI (the result is retained privately for future detail views). Delegate is
+ * represented by its sidekick card, so its row is suppressed.
  */
 export class ToolActivity implements Component {
   private readonly rows: ToolRow[] = [];
@@ -150,6 +212,7 @@ export class ToolActivity implements Component {
         name,
         status: "running",
         detail: startDetail(name, toolCall?.arguments),
+        args: record(toolCall?.arguments),
         turn,
       });
       this.currentTurn = turn;
@@ -165,10 +228,24 @@ export class ToolActivity implements Component {
       const result = record(event.result);
       const isError = result?.isError === true;
       row.status = isError ? "failed" : "ok";
+      // Retain the original result privately for future detail views.
+      row.resultData = result;
       if (isError) {
         row.error = compactError(result?.text);
-      } else if (name === "verification") {
-        row.summary = verificationSummary(result?.details);
+        if (name === "bash" || name === "verification") {
+          row.exitCode = exitCodeOf(result);
+        }
+      } else if (name === "edit") {
+        row.diff = editDiff(row.args);
+      } else if (name === "bash" || name === "verification") {
+        // Test-count summary first ("81 pass" -> "81 passed"), then the
+        // whitelisted per-command ok flags for verification.
+        const text = result?.text;
+        const stdout = record(result?.details)?.stdout;
+        row.summary =
+          testCount(text) ??
+          testCount(stdout) ??
+          (name === "verification" ? verificationChecks(result?.details) : undefined);
       }
       return true;
     }
@@ -220,11 +297,17 @@ export class ToolActivity implements Component {
         : cyan(glyph);
     const detail = row.detail ? ` ${dim(row.detail)}` : "";
     const suffix = row.status === "running" ? ` ${cyan("…")}` : "";
+    const exit = row.status === "failed" && row.exitCode !== undefined
+      ? ` ${yellow(`· exit ${row.exitCode}`)}`
+      : "";
     const summary = row.status === "ok" && row.summary
       ? ` ${green(`· ${row.summary}`)}`
       : "";
+    const diff = row.status === "ok" && row.diff
+      ? ` ${green(`+${row.diff.added}`)}${row.diff.removed > 0 ? ` ${yellow(`-${row.diff.removed}`)}` : ""}`
+      : "";
     const line = truncateToWidth(
-      ` ${styledGlyph} ${label}${detail}${suffix}${summary}`,
+      ` ${styledGlyph} ${label}${detail}${suffix}${exit}${summary}${diff}`,
       width,
     );
     if (row.status !== "failed" || !row.error) return [line];

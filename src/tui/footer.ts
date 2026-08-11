@@ -32,6 +32,8 @@ export interface FooterOptions {
   context?: ContextSummary;
   /** Presentation metadata: number of sidekicks currently working. */
   sidekickWorking?: number;
+  /** Presentation metadata: total sidekicks in the current delegation batch. */
+  sidekickTotal?: number;
   /** Whether a manager run is active (drives the prompt spinner). */
   managerWorking?: boolean;
   /** Workspace root; drives file-path completion in the editor. */
@@ -53,9 +55,8 @@ export interface FooterOptions {
   requestRender?: () => void;
 }
 
-/** Spinner frames shown while a manager run is active. */
-const PROMPT_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const PROMPT_SPINNER_INTERVAL_MS = 100;
+/** How often the running status refreshes its elapsed-seconds readout. */
+const STATUS_TICK_MS = 1000;
 
 function contextText(context: ContextSummary | undefined): string {
   if (typeof context === "string") return sanitizeText(context, false) || "--";
@@ -204,8 +205,10 @@ export class Footer implements Component, Focusable {
   private thinking: string;
   private context?: ContextSummary;
   private sidekickWorking = 0;
+  private sidekickTotal = 0;
   private managerWorking = false;
-  private frame = 0;
+  /** Wall-clock time the current manager run started (for elapsed seconds). */
+  private workingStartedAt?: number;
   private timer?: Timer;
   private handleEscape: (data: string) => void;
   private readonly optionsRequestRender?: () => void;
@@ -224,7 +227,9 @@ export class Footer implements Component, Focusable {
     this.thinking = sanitizeText(options.thinking ?? "off", false) || "off";
     this.context = options.context;
     this.sidekickWorking = Math.max(0, Math.floor(options.sidekickWorking ?? 0));
+    this.sidekickTotal = Math.max(0, Math.floor(options.sidekickTotal ?? 0));
     this.managerWorking = options.managerWorking === true;
+    this.workingStartedAt = this.managerWorking ? Date.now() : undefined;
 
     // The editor must be constructed with a real TUI for terminal sizing; the
     // test seam supplies its host instead, which exposes the same surface.
@@ -296,6 +301,7 @@ export class Footer implements Component, Focusable {
     thinking?: string;
     context?: ContextSummary;
     sidekickWorking?: number;
+    sidekickTotal?: number;
     managerWorking?: boolean;
   }): void {
     if (update.managerModel !== undefined) {
@@ -308,11 +314,14 @@ export class Footer implements Component, Focusable {
     if (update.sidekickWorking !== undefined) {
       this.sidekickWorking = Math.max(0, Math.floor(update.sidekickWorking));
     }
+    if (update.sidekickTotal !== undefined) {
+      this.sidekickTotal = Math.max(0, Math.floor(update.sidekickTotal));
+    }
     if (update.managerWorking !== undefined) {
       const next = update.managerWorking === true;
       if (this.managerWorking !== next) {
         this.managerWorking = next;
-        this.frame = 0;
+        this.workingStartedAt = next ? Date.now() : undefined;
         this.updateTimer();
       }
     }
@@ -429,10 +438,26 @@ export class Footer implements Component, Focusable {
         truncateToWidth(line, width),
       ];
     }
+    const singleLine = this.editor.getLines().length === 1
+      && !this.editor.isShowingAutocomplete();
+    // A single logical line with no dropdown renders as top border + content
+    // + bottom border; render it at width-2 and strip the border rows so the
+    // idle input is a minimal `> _` prompt instead of a boxed editor. The
+    // cursor marker stays inline in the retained content row. The `> `
+    // prefix only fits from width 3 up; narrower widths render bare content
+    // (already truncated by truncateToWidth).
+    const editorLines = this.editor.render(singleLine ? Math.max(1, width - 2) : width);
+    const editorContent = singleLine && editorLines.length >= 3
+      ? editorLines.slice(1, -1).map((line, index) =>
+          index === 0
+            ? truncateToWidth(width >= 3 ? `${green(">")} ${line}` : line, width)
+            : truncateToWidth(`  ${line}`, width),
+        )
+      : editorLines;
     return [
       rule,
+      ...editorContent,
       ...this.status.render(width),
-      ...this.editor.render(width),
     ];
   }
 
@@ -443,22 +468,46 @@ export class Footer implements Component, Focusable {
     }
     if (this.managerWorking) {
       this.timer = setInterval(() => {
-        this.frame = (this.frame + 1) % PROMPT_SPINNER.length;
         this.refresh();
         this.optionsRequestRender?.();
-      }, PROMPT_SPINNER_INTERVAL_MS);
+      }, STATUS_TICK_MS);
     }
   }
 
+  /** Sidekick status segment shared by the running and idle status lines. */
+  private sidekickText(): string {
+    if (this.sidekickTotal > 0) {
+      return this.sidekickWorking > 0
+        ? ` · ${green(`${this.sidekickWorking}/${this.sidekickTotal} sidekicks running`)}`
+        : ` · ${dim(`0/${this.sidekickTotal} sidekicks running`)}`;
+    }
+    if (this.sidekickWorking > 0) {
+      return ` · ${green(`${this.sidekickWorking} sidekick${this.sidekickWorking === 1 ? "" : "s"} working`)}`;
+    }
+    return ` · ${dim("sidekick: idle")}`;
+  }
+
+  /** Whether the session context is meaningful enough to replace the hints. */
+  private hasUsefulContext(): boolean {
+    const context = this.context;
+    if (context === undefined) return false;
+    if (typeof context === "string") return context.trim().length > 0;
+    return Number.isFinite(context.used) && context.used > 0;
+  }
+
   private refresh(): void {
-    const working = this.managerWorking
-      ? `${cyan(PROMPT_SPINNER[this.frame % PROMPT_SPINNER.length]!)} working · `
-      : "";
-    const sidekicks = this.sidekickWorking > 0
-      ? ` · ${green(`${this.sidekickWorking} sidekick${this.sidekickWorking === 1 ? "" : "s"} working`)}`
-      : ` · ${dim("sidekick: idle")}`;
-    this.status = new TruncatedText(
-      `${working}${dim("model")} ${cyan(this.model)} · ${dim("context")} ${contextText(this.context)}${sidekicks}`,
-    );
+    if (this.managerWorking) {
+      const elapsed = this.workingStartedAt !== undefined
+        ? Math.max(0, Math.floor((Date.now() - this.workingStartedAt) / 1000))
+        : 0;
+      this.status = new TruncatedText(
+        `${dim("esc cancel")} · ${dim("ctrl+c quit")}${this.sidekickText()} · ${cyan(`${elapsed}s`)}`,
+      );
+      return;
+    }
+    const prompt = this.hasUsefulContext()
+      ? `${dim("context")} ${contextText(this.context)} · ${green("session saved")}`
+      : `${dim("/help")}  ${dim("/model")}  ${dim("/provider")}  ${dim("/memory")}`;
+    this.status = new TruncatedText(`${prompt}${this.sidekickText()}`);
   }
 }

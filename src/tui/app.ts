@@ -44,6 +44,10 @@ export interface LocalManagerEvent {
 export interface AgentTuiOptions {
   product?: string;
   managerModel: string;
+  /** Presentation metadata: the sidekick model id shown in the header. */
+  sidekickModel?: string;
+  /** Current manager session id shown in the header. */
+  sessionId?: string;
   workspace: string;
   thinking?: string;
   context?: ContextSummary;
@@ -100,7 +104,7 @@ function managerError(value: unknown): string {
   return "Manager stream failed.";
 }
 
-/** Four-area pi-tui application shell for manager/sidekick orchestration. */
+/** Three-area pi-tui application shell for manager/sidekick orchestration. */
 export class AgentTui {
   readonly tui: TuiHost;
   readonly header: Header;
@@ -116,6 +120,8 @@ export class AgentTui {
   private activeManagerStream?: string;
   /** Transcript entry id for each turn's inline tool block. */
   private readonly toolBlockByTurn = new Map<number, string>();
+  /** Transcript live block id for each inline sidekick card (by card id). */
+  private readonly sidekickBlockByCard = new Map<string, string>();
   private runState: HeaderRunState = "idle";
   private started = false;
   private mouseTrackingEnabled = false;
@@ -137,6 +143,8 @@ export class AgentTui {
     this.header = new Header({
       product: options.product,
       managerModel: options.managerModel,
+      sidekickModel: options.sidekickModel,
+      sessionId: options.sessionId,
       workspace: options.workspace,
       thinking: options.thinking,
     });
@@ -177,11 +185,10 @@ export class AgentTui {
       this.requestRender();
     };
 
-    // Four top-level areas: header, transcript, sidekick cards, footer.
-    // Manager tool calls render inline inside the transcript as blocks.
+    // Three top-level areas: header, transcript, footer. Sidekick cards and
+    // manager tool calls render inline inside the transcript as live blocks.
     this.tui.addChild(this.header);
     this.tui.addChild(this.transcript);
-    this.tui.addChild(this.sidekicks);
     this.tui.addChild(this.footer);
     this.tui.setFocus(this.footer);
     this.tui.addInputListener((data) => {
@@ -276,7 +283,6 @@ export class AgentTui {
     return [
       ...this.header.render(width),
       ...this.transcript.render(width),
-      ...this.sidekicks.render(width),
       ...this.footer.render(width),
     ];
   }
@@ -285,15 +291,15 @@ export class AgentTui {
    * Bound the transcript to the visible viewport so its rendered line count
    * never grows during streaming (pi-tui's differential renderer would
    * otherwise scroll the terminal to the tail, yanking the user's scroll
-   * position). Header/footer reservations are fixed; sidekick cards occupy
-   * their current rendered height.
+   * position). Sidekick cards live inline in the transcript, so only the
+   * header and the footer's actual rendered height are reserved.
    */
   private syncTranscriptHeight(width: number): void {
     const rows = this.tui.terminal?.rows;
     if (!rows || rows <= 0) return;
-    const reserved = 1 /* header */ + 5 /* footer rule+status+editor */;
-    const sidekickRows = this.sidekicks.render(width).length;
-    const available = Math.max(4, rows - reserved - sidekickRows);
+    const reserved =
+      this.header.render(width).length + this.footer.render(width).length;
+    const available = Math.max(4, rows - reserved);
     if (available !== this.lastTranscriptMaxLines) {
       this.lastTranscriptMaxLines = available;
       this.transcript.setMaxLines(available);
@@ -327,6 +333,9 @@ export class AgentTui {
     this.transcript.clearEntries();
     this.toolBlockByTurn.clear();
     this.tools.clear();
+    this.sidekicks.clear();
+    this.sidekickBlockByCard.clear();
+    this.updateSidekickStatus();
     for (const entry of entries) {
       if (entry.role === "user") this.addUser(entry.text);
       else this.addManager(entry.text);
@@ -395,7 +404,7 @@ export class AgentTui {
       const turn = record(event)?.turn;
       const turnNumber = typeof turn === "number" ? turn : 0;
       if (tracked && type === "tool_start" && !this.toolBlockByTurn.has(turnNumber)) {
-        const id = this.transcript.appendToolBlock(
+        const id = this.transcript.appendLiveBlock(
           this.tools.rendererForTurn(turnNumber),
         );
         this.toolBlockByTurn.set(turnNumber, id);
@@ -405,23 +414,33 @@ export class AgentTui {
   }
 
   handleDelegateEvent(event: LocalDelegateEvent): void {
-    this.sidekicks.apply(event);
+    const cardId = this.sidekicks.apply(event);
+    this.attachCard(cardId);
     this.updateSidekickStatus();
     this.requestRender();
   }
 
-  /** Mirror the running-sidekick count into the footer without touching cards. */
-  private updateSidekickStatus(): void {
-    const working = this.sidekicks.workingCount();
-    this.footer.setStatus({ sidekickWorking: working });
+  /** Append the inline card block the first time a sidekick card is seen. */
+  private attachCard(cardId: string | undefined): void {
+    if (!cardId || this.sidekickBlockByCard.has(cardId)) return;
+    const blockId = this.transcript.appendLiveBlock(
+      this.sidekicks.rendererFor(cardId),
+    );
+    this.sidekickBlockByCard.set(cardId, blockId);
   }
 
-  /** Set the header run state and mirror it to the footer spinner. */
+  /** Mirror the sidekick working + total counts into the footer status. */
+  private updateSidekickStatus(): void {
+    this.footer.setStatus({
+      sidekickWorking: this.sidekicks.workingCount(),
+      sidekickTotal: this.sidekicks.totalCount(),
+    });
+  }
+
+  /** Track the run state for the footer + exit-arm; the header shows no run state. */
   private setRunState(state: HeaderRunState): void {
     if (this.runState === state) return;
     this.runState = state;
-    if (state === "idle") this.header.setTurn(0);
-    this.header.setRunState(state);
     this.footer.setStatus({ managerWorking: state !== "idle" });
   }
 
@@ -442,7 +461,9 @@ export class AgentTui {
   }
 
   delegateStarted(index: number, taskCount = 1): void {
-    this.sidekicks.start(index, taskCount);
+    const cardId = this.sidekicks.start(index, taskCount);
+    this.attachCard(cardId);
+    this.updateSidekickStatus();
     this.requestRender();
   }
 
@@ -451,7 +472,9 @@ export class AgentTui {
     activity: LocalSidekickActivity,
     taskCount = 1,
   ): void {
-    this.sidekicks.activity(index, taskCount, activity);
+    const cardId = this.sidekicks.activity(index, taskCount, activity);
+    this.attachCard(cardId);
+    this.updateSidekickStatus();
     this.requestRender();
   }
 
@@ -460,12 +483,16 @@ export class AgentTui {
     result: LocalSidekickResult,
     taskCount = 1,
   ): void {
-    this.sidekicks.finish(index, taskCount, result);
+    const cardId = this.sidekicks.finish(index, taskCount, result);
+    this.attachCard(cardId);
+    this.updateSidekickStatus();
     this.requestRender();
   }
 
   setStatus(update: {
     managerModel?: string;
+    sidekickModel?: string;
+    sessionId?: string;
     thinking?: string;
     context?: ContextSummary;
     turn?: number;
@@ -473,18 +500,25 @@ export class AgentTui {
     if (update.managerModel !== undefined) {
       this.header.setManagerModel(update.managerModel);
     }
+    if (update.sidekickModel !== undefined) {
+      this.header.setSidekickModel(update.sidekickModel);
+    }
+    if (update.sessionId !== undefined) {
+      this.header.setSessionId(update.sessionId);
+    }
     if (update.thinking !== undefined) {
       this.header.setThinking(update.thinking);
     }
-    if (update.turn !== undefined) {
-      this.header.setTurn(update.turn);
-    }
-    this.footer.setStatus(update);
+    this.footer.setStatus({
+      managerModel: update.managerModel,
+      thinking: update.thinking,
+      context: update.context,
+    });
     this.requestRender();
   }
 
-  setTurn(turn: number): void {
-    this.header.setTurn(turn);
+  /** Public turn signal retained for CLI compatibility (no header turn chip). */
+  setTurn(_turn: number): void {
     this.requestRender();
   }
 
