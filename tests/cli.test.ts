@@ -34,8 +34,8 @@ async function fixture(): Promise<{ workspace: string; config: AgentConfig }> {
     workspace,
     config: {
       dataDir: join(workspace, "data"),
-      manager: { provider: "fake", model: "manager", thinking: "off", maxTurns: 17 },
-      sidekick: { provider: "fake", model: "sidekick", thinking: "off", maxTurns: 19 },
+      manager: { provider: "fake", model: "manager", thinking: "off" },
+      sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
       memory: { auto: true },
     },
   };
@@ -161,8 +161,6 @@ describe("CLI argument and noninteractive paths", () => {
     expect(code).toBe(0);
     expect(received?.input).toBe("implement feature");
     expect(received?.workspace).toBe(workspace);
-    expect(received?.config?.manager?.maxTurns).toBe(17);
-    expect(received?.config?.sidekick?.maxTurns).toBe(19);
     expect(io.out).toBe("streamed answer\n");
     expect(io.err).toContain("Sidekick 1/1 started");
     expect(io.err).toContain("complete: changed files");
@@ -208,7 +206,7 @@ describe("CLI argument and noninteractive paths", () => {
     expect(received?.authKey).toBeUndefined();
   });
 
-  test("direct max_turns keeps partial text and reports a limit", async () => {
+  test("direct non-completed status reports the stop reason", async () => {
     const { workspace, config } = await fixture();
     const io = captureIo();
     const code = await runCli(["bounded task"], {
@@ -216,18 +214,21 @@ describe("CLI argument and noninteractive paths", () => {
       io,
       loadConfig: async () => config,
       runManager: async (options) => ({
-        status: "max_turns",
-        turns: 17,
-        toolCalls: 16,
+        status: "error",
+        turns: 3,
+        toolCalls: 2,
         messages: [],
         sessionId: options.sessionId ?? "manager",
         finalText: "partial answer",
+        error: "provider exploded",
       }),
     });
     expect(code).toBe(1);
+    // Partial text is still flushed before the stop is reported.
     expect(io.out).toBe("partial answer\n");
-    expect(io.err).toContain("reached max_turns");
-    expect(io.err).not.toContain("stopped with status max_turns");
+    expect(io.err).toContain("stopped with status error");
+    expect(io.err).toContain("provider exploded");
+    expect(io.err).not.toContain("max_turns");
   });
 
   test("--continue selects the newest manager session for a direct task", async () => {
@@ -308,7 +309,7 @@ describe("interactive integration", () => {
     expect(fakeTui?.stops).toBe(1);
   });
 
-  test("interactive max_turns shows partial text as a limit notice", async () => {
+  test("interactive non-completed status surfaces the stop reason", async () => {
     const { workspace, config } = await fixture();
     let fakeTui: FakeTui | undefined;
     const code = await runCli([], {
@@ -316,12 +317,13 @@ describe("interactive integration", () => {
       io: captureIo(),
       loadConfig: async () => config,
       runManager: async (options) => ({
-        status: "max_turns",
-        turns: 17,
-        toolCalls: 16,
+        status: "error",
+        turns: 3,
+        toolCalls: 2,
         messages: [],
         sessionId: options.sessionId ?? "manager",
         finalText: "partial interactive answer",
+        error: "provider exploded",
       }),
       createTui: (options) => {
         fakeTui = new FakeTui(options, async (callbacks) => {
@@ -332,9 +334,11 @@ describe("interactive integration", () => {
       },
     });
     expect(code).toBe(0);
-    expect(fakeTui?.info).toContain("partial interactive answer");
-    expect(fakeTui?.info.some((text) => text.includes("reached max_turns"))).toBe(true);
-    expect(fakeTui?.errors).toHaveLength(0);
+    // The stop reason surfaces as an error (non-completed statuses no longer
+    // have a max_turns branch; partial text is not replayed for errors).
+    expect(fakeTui?.errors.some((text) => text.includes("stopped with status error"))).toBe(true);
+    expect(fakeTui?.errors.some((text) => text.includes("provider exploded"))).toBe(true);
+    expect(fakeTui?.errors).toHaveLength(1);
   });
 
   test("interactive flow passes a stored commandcode sidekick key, never the manager's", async () => {

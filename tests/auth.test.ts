@@ -90,6 +90,36 @@ describe("AuthStore", () => {
     expect(await store.getKey("empty")).toBeUndefined();
     expect(await store.getKey("nested")).toBeUndefined();
   });
+
+  test("root may be auth.json or the directory containing it", async () => {
+    const dir = await fixture();
+    const viaFile = new AuthStore({ root: join(dir, "auth.json"), env: {} });
+    const viaDir = new AuthStore({ root: dir, env: {} });
+    await viaFile.setKey("commandcode", "shared-key-123");
+    expect(await viaDir.getKey("commandcode")).toBe("shared-key-123");
+  });
+
+  test("passing both root and dataDir throws", async () => {
+    const root = await fixture();
+    expect(() => new AuthStore({ root, dataDir: root, env: {} })).toThrow();
+  });
+
+  test("setKey rejects empty or whitespace-only provider ids and keys", async () => {
+    const root = await fixture();
+    const store = new AuthStore({ dataDir: root, env: {} });
+    await expect(store.setKey("   ", "sk-test-123")).rejects.toThrow();
+    await expect(store.setKey("commandcode", "   ")).rejects.toThrow();
+  });
+
+  test("effectiveKey falls back to the stored key when env is whitespace-only", async () => {
+    const root = await fixture();
+    const store = new AuthStore({
+      dataDir: root,
+      env: { COMMANDCODE_API_KEY: "   " },
+    });
+    await store.setKey("commandcode", "stored-key-789");
+    expect(await store.effectiveKey("commandcode", "COMMANDCODE_API_KEY")).toBe("stored-key-789");
+  });
 });
 
 describe("commandCodeCredentials with stored key", () => {

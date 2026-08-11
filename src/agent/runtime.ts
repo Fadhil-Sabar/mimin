@@ -26,18 +26,8 @@ export class AgentRuntime {
   toConfig(): AgentConfig {
     return {
       dataDir: this.dataDir,
-      manager: {
-        ...this.manager,
-        ...(this.manager.maxTurns !== undefined
-          ? { maxTurns: this.manager.maxTurns }
-          : {}),
-      },
-      sidekick: {
-        ...this.sidekick,
-        ...(this.sidekick.maxTurns !== undefined
-          ? { maxTurns: this.sidekick.maxTurns }
-          : {}),
-      },
+      manager: { ...this.manager },
+      sidekick: { ...this.sidekick },
       memory: this.memory,
     };
   }

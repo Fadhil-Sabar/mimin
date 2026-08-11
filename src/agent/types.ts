@@ -113,6 +113,4 @@ export interface AgentRunConfig {
   metadata?: Record<string, unknown>;
   /** Optional pi thinking level; `off` uses the regular pi-ai stream. */
   thinking?: ModelThinkingLevel;
-  /** Maximum number of model turns for this run. */
-  maxTurns?: number;
 }

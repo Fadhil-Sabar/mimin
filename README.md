@@ -51,7 +51,7 @@ Configuration is merged in this order, with later layers winning:
 3. project `<cwd>/.mimin/config.json`;
 4. `MIMIN_DATA_DIR` for the persistent data-directory override.
 
-Nested role objects merge, so a project can override only its manager model or thinking level. Each role's `provider` is optional: a role without a `provider` inherits the **other role's** provider (the global provider), so you only ever configure the provider once. The `model` is optional too — a role without a `model` uses the other role's model when providers match, or the provider's first registered model. At least one role must set a `provider`, and each role keeps its own `thinking` and optional `maxTurns` (positive safe integer; default 24 for the manager, 8 for the sidekick) bounding how many model turns one run may take. `provider` accepts any built-in pi-ai provider id (e.g. `anthropic`, `openai`, `openrouter`) or the custom `commandcode` provider described above.
+Nested role objects merge, so a project can override only its manager model or thinking level. Each role's `provider` is optional: a role without a `provider` inherits the **other role's** provider (the global provider), so you only ever configure the provider once. The `model` is optional too — a role without a `model` uses the other role's model when providers match, or the provider's first registered model. At least one role must set a `provider`, and each role keeps its own `thinking`. `provider` accepts any built-in pi-ai provider id (e.g. `anthropic`, `openai`, `openrouter`) or the custom `commandcode` provider described above.
 
 ```json
 {

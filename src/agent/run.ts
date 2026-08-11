@@ -26,16 +26,13 @@ import type {
   ToolExecutionValue,
 } from "./types.js";
 
-export const DEFAULT_MAX_TURNS = 8;
-
-/** A stream factory is injectable so loop tests never need a live provider. */
 export type AgentStreamFactory = (
   model: Model<Api>,
   context: Context,
   options?: ProviderStreamOptions,
 ) => AssistantMessageEventStream;
 
-export type AgentTerminalStatus = "completed" | "max_turns" | "aborted" | "error";
+export type AgentTerminalStatus = "completed" | "aborted" | "error";
 
 /** Structured terminal state returned after the model/tool loop stops. */
 export interface RunAgentResult {
@@ -58,8 +55,6 @@ export interface RunAgentOptions<TApi extends Api = Api> {
   /** Explicitly supplied permissions; the engine does not add tools of its own. */
   tools?: AgentToolCollection;
   config?: AgentRunConfig;
-  /** Convenience override for `config.maxTurns`. */
-  maxTurns?: number;
   signal?: AbortSignal;
   onEvent?: AgentEventCallback;
   /** Optional test seam; production uses pi-ai's stream/streamSimple functions. */
@@ -114,7 +109,6 @@ function streamOptionsFromConfig(
 
   const {
     thinking: _thinking,
-    maxTurns: _maxTurns,
     ...providerOptions
   } = config;
   return {
@@ -131,23 +125,19 @@ async function emit(
 }
 
 /**
- * Run one generic, bounded, tool-calling conversation.
+ * Run one generic, unbounded, tool-calling conversation.
  *
  * Each model response is one turn. The complete assistant response is added
  * before any tool result, and all tool calls in that response are executed in
  * order. The next model turn receives the same mutable message array, so tool
- * output is part of its context. Role-specific permissions belong entirely in
- * the injected tool collection.
+ * output is part of its context. The loop continues until the model finishes
+ * (no tool calls), errors, or the caller aborts the signal. Role-specific
+ * permissions belong entirely in the injected tool collection.
  */
 export async function runAgent<TApi extends Api = Api>(
   options: RunAgentOptions<TApi>,
 ): Promise<RunAgentResult> {
   const config = options.config;
-  const maxTurns = options.maxTurns ?? config?.maxTurns ?? DEFAULT_MAX_TURNS;
-  if (!Number.isSafeInteger(maxTurns) || maxTurns < 1) {
-    throw new RangeError("maxTurns must be a positive safe integer");
-  }
-
   const session = options.session;
   const messages = options.messages ?? session?.messages ?? [];
   const tools = normalizeTools(options.tools);
@@ -192,7 +182,7 @@ export async function runAgent<TApi extends Api = Api>(
     ...extra,
   });
 
-  while (turns < maxTurns) {
+  while (true) {
     if (signal?.aborted) {
       return finish("aborted", { error: "Agent run aborted" });
     }
@@ -339,13 +329,7 @@ export async function runAgent<TApi extends Api = Api>(
         result,
       });
     }
-
-    if (turns >= maxTurns) {
-      return finish("max_turns");
-    }
   }
-
-  return finish("max_turns");
 }
 
 async function appendMessage(

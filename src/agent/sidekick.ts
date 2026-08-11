@@ -247,9 +247,7 @@ export function parseSidekickResult(
   const normalizedStatus =
     terminalFailure
       ? "blocked"
-      : options.runStatus === "max_turns" && parsedStatus === "complete"
-        ? "partial"
-        : parsedStatus;
+      : parsedStatus;
 
   return {
     status: normalizedStatus,

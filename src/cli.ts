@@ -577,12 +577,6 @@ async function runDirect(
       lastWasNewline = text.endsWith("\n");
     }
     if (!lastWasNewline) io.stdout("\n");
-    if (result.status === "max_turns") {
-      io.stderr(
-        `Manager reached max_turns after ${result.turns} turn${result.turns === 1 ? "" : "s"}; output may be partial.\n`,
-      );
-      return 1;
-    }
     if (result.status !== "completed") {
       io.stderr(`Manager stopped with status ${result.status}${result.error ? `: ${terminalText(result.error, 2_000)}` : ""}.\n`);
       return result.status === "aborted" ? 130 : 1;
@@ -776,14 +770,7 @@ async function runInteractive(
         sessionId = result.sessionId;
         app?.setStatus({ sessionId });
         completed = result.status === "completed";
-        if (result.status === "max_turns") {
-          if (result.finalText && !receivedManagerText) {
-            app?.addManager(terminalText(result.finalText, 256 * 1024));
-          }
-          app?.addInfo(
-            `Manager reached max_turns after ${result.turns} turn${result.turns === 1 ? "" : "s"}; output may be partial.`,
-          );
-        } else if (!completed) {
+        if (!completed) {
           app?.addError(
             `Manager stopped with status ${result.status}${result.error ? `: ${terminalText(result.error, 2_000)}` : ""}.`,
           );

@@ -6,7 +6,7 @@ export type {
   ThinkingSetting,
 } from "./config.js";
 
-export { runAgent, DEFAULT_MAX_TURNS } from "./agent/run.js";
+export { runAgent } from "./agent/run.js";
 export type {
   AgentStreamFactory,
   RunAgentOptions,

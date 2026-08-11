@@ -3,12 +3,10 @@
   "manager": {
     "provider": "commandcode",
     "model": "gpt-5.5",
-    "thinking": "medium",
-    "maxTurns": 24
+    "thinking": "medium"
   },
   "sidekick": {
     "model": "deepseek/deepseek-v4-flash",
-    "thinking": "low",
-    "maxTurns": 8
+    "thinking": "low"
   }
 }

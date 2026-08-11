@@ -6,9 +6,6 @@ export const MIMIN_DATA_DIR_ENV_VAR = "MIMIN_DATA_DIR" as const;
 
 export type ThinkingSetting = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 
-export const DEFAULT_MANAGER_MAX_TURNS = 24;
-export const DEFAULT_SIDEKICK_MAX_TURNS = 8;
-
 export interface RoleConfig {
   /**
    * Provider id. Empty means "inherit": the role uses the same provider as
@@ -19,8 +16,6 @@ export interface RoleConfig {
   /** Model id. Empty inherits the other role's model when providers match. */
   model: string;
   thinking: ThinkingSetting;
-  /** Maximum number of model turns for this role run. */
-  maxTurns?: number;
 }
 
 export interface MemoryConfig {
@@ -176,21 +171,6 @@ function thinkingValue(
   return value as ThinkingSetting;
 }
 
-function maxTurnsValue(
-  object: RawObject,
-  path: string,
-  issues: string[],
-  defaultMaxTurns: number,
-): number {
-  const value = object.maxTurns;
-  if (value === undefined) return defaultMaxTurns;
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) {
-    issues.push(`${path}.maxTurns must be a positive safe integer`);
-    return defaultMaxTurns;
-  }
-  return value;
-}
-
 function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
   const issues: string[] = [];
   const manager = isObject(raw.manager) ? raw.manager : undefined;
@@ -202,17 +182,11 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     provider: manager ? optionalString(manager, "provider", "manager", issues) : "",
     model: manager ? optionalString(manager, "model", "manager", issues) : "",
     thinking: manager ? thinkingValue(manager, "manager", issues) : "medium",
-    maxTurns: manager
-      ? maxTurnsValue(manager, "manager", issues, DEFAULT_MANAGER_MAX_TURNS)
-      : DEFAULT_MANAGER_MAX_TURNS,
   };
   const sidekickConfig: RoleConfig = {
     provider: sidekick ? optionalString(sidekick, "provider", "sidekick", issues) : "",
     model: sidekick ? optionalString(sidekick, "model", "sidekick", issues) : "",
     thinking: sidekick ? thinkingValue(sidekick, "sidekick", issues) : "medium",
-    maxTurns: sidekick
-      ? maxTurnsValue(sidekick, "sidekick", issues, DEFAULT_SIDEKICK_MAX_TURNS)
-      : DEFAULT_SIDEKICK_MAX_TURNS,
   };
 
   const memoryRaw = isObject(raw.memory) ? raw.memory : {};
@@ -278,8 +252,8 @@ export function defaultConfig(options: LoadConfigOptions = {}): AgentConfig {
   const dataDir = defaultDataDir({ ...options, cwd, homeDir: home });
   return {
     dataDir,
-    manager: { provider: "", model: "", thinking: "medium", maxTurns: DEFAULT_MANAGER_MAX_TURNS },
-    sidekick: { provider: "", model: "", thinking: "medium", maxTurns: DEFAULT_SIDEKICK_MAX_TURNS },
+    manager: { provider: "", model: "", thinking: "medium" },
+    sidekick: { provider: "", model: "", thinking: "medium" },
     memory: { auto: true },
   };
 }

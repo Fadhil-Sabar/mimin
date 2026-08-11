@@ -168,7 +168,6 @@ describe("runAgent", () => {
       messages,
       tools: [echo],
       stream,
-      maxTurns: 3,
     });
 
     expect(result.status).toBe("completed");
@@ -215,7 +214,6 @@ describe("runAgent", () => {
       systemPrompt: "Test prompt",
       messages,
       stream: streamFactory,
-      maxTurns: 3,
       signal: controller.signal,
     });
 
@@ -225,5 +223,100 @@ describe("runAgent", () => {
     const result = await runPromise;
     expect(result.status).toBe("aborted");
     expect(result.turns).toBe(1);
+  });
+
+  test("loops past the former 8-turn cap and stops only by completion", async () => {
+    // Ten tool-calling turns then a final stop: the loop must never hit a
+    // hidden turn limit (maxTurns was removed end-to-end).
+    const responses: AssistantMessage[] = [];
+    for (let index = 0; index < 10; index += 1) {
+      responses.push(assistant(
+        [
+          {
+            type: "toolCall",
+            id: `call-${index}`,
+            name: "echo",
+            arguments: { value: `step ${index}` },
+          },
+        ],
+        "toolUse",
+        index + 2,
+      ));
+    }
+    responses.push(assistant([{ type: "text", text: "done" }], "stop", 12));
+    const stream = (_model: Model<Api>, _context: Context) => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected turn");
+      return completedStream(response);
+    };
+    const messages: Message[] = [
+      { role: "user", content: "keep going", timestamp: 1 },
+    ];
+
+    const result = await runAgent({
+      model,
+      systemPrompt: "Test prompt",
+      messages,
+      tools: [{
+        name: "echo",
+        description: "echo",
+        parameters: Type.Object({ value: Type.String() }),
+        execute: () => "ok",
+      }],
+      stream,
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.turns).toBe(11);
+    expect(result.toolCalls).toBe(10);
+  });
+
+  test("loops past the former 8-turn cap and aborts cleanly on signal", async () => {
+    const responses: AssistantMessage[] = [];
+    for (let index = 0; index < 12; index += 1) {
+      responses.push(assistant(
+        [
+          {
+            type: "toolCall",
+            id: `call-${index}`,
+            name: "echo",
+            arguments: { value: `step ${index}` },
+          },
+        ],
+        "toolUse",
+        index + 2,
+      ));
+    }
+    const controller = new AbortController();
+    let calls = 0;
+    const stream = (_model: Model<Api>, _context: Context) => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected turn");
+      calls += 1;
+      // After the loop is provably past the old cap, abort.
+      if (calls === 10) controller.abort();
+      return completedStream(response);
+    };
+    const messages: Message[] = [
+      { role: "user", content: "keep going", timestamp: 1 },
+    ];
+
+    const result = await runAgent({
+      model,
+      systemPrompt: "Test prompt",
+      messages,
+      tools: [{
+        name: "echo",
+        description: "echo",
+        parameters: Type.Object({ value: Type.String() }),
+        execute: () => "ok",
+      }],
+      stream,
+      signal: controller.signal,
+    });
+
+    expect(result.status).toBe("aborted");
+    // The loop ran well beyond the old 8-turn limit before aborting.
+    expect(result.turns).toBeGreaterThan(8);
   });
 });

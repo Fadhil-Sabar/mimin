@@ -12,13 +12,11 @@ const roles: { manager: RoleConfig; sidekick: RoleConfig } = {
     provider: "manager-provider",
     model: "manager-model",
     thinking: "low",
-    maxTurns: 11,
   },
   sidekick: {
     provider: "sidekick-provider",
     model: "sidekick-model",
     thinking: "medium",
-    maxTurns: 13,
   },
 };
 
@@ -74,13 +72,11 @@ describe("layered config", () => {
       provider: "manager-provider",
       model: "project-manager-model",
       thinking: "low",
-      maxTurns: 11,
     });
     expect(config.sidekick).toEqual({
       provider: "sidekick-provider",
       model: "sidekick-model",
       thinking: "high",
-      maxTurns: 13,
     });
     expect(config.dataDir).toBe(join(project, "project-data"));
   });
@@ -152,27 +148,25 @@ describe("layered config", () => {
     ).rejects.toBeInstanceOf(ConfigValidationError);
   });
 
-  test("defaults and validates bounded role maxTurns", async () => {
+  test("legacy maxTurns in config files is accepted and ignored", async () => {
     const { home, project } = await fixture();
+    // A config written before maxTurns removal must still load cleanly.
     await writeJson(join(project, ".mimin", "config.json"), {
-      manager: { provider: "provider", model: "manager", thinking: "medium" },
-      sidekick: { provider: "provider", model: "sidekick", thinking: "low" },
+      manager: { provider: "provider", model: "manager", thinking: "medium", maxTurns: 24 },
+      sidekick: { provider: "provider", model: "sidekick", thinking: "low", maxTurns: 8 },
     });
-    const defaults = await loadConfig({ cwd: project, homeDir: home, env: {} });
-    expect(defaults.manager.maxTurns).toBe(24);
-    expect(defaults.sidekick.maxTurns).toBe(8);
-
-    await writeJson(join(project, ".mimin", "config.json"), {
-      manager: { provider: "provider", model: "manager", thinking: "medium", maxTurns: 0 },
-      sidekick: { provider: "provider", model: "sidekick", thinking: "low", maxTurns: 1.5 },
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    // The role configs carry no maxTurns field at all.
+    expect(config.manager).toEqual({
+      provider: "provider",
+      model: "manager",
+      thinking: "medium",
     });
-    await expect(loadConfig({ cwd: project, homeDir: home, env: {}}))
-      .rejects.toMatchObject({
-        issues: [
-          "manager.maxTurns must be a positive safe integer",
-          "sidekick.maxTurns must be a positive safe integer",
-        ],
-      });
+    expect(config.sidekick).toEqual({
+      provider: "provider",
+      model: "sidekick",
+      thinking: "low",
+    });
   });
 
   test("memory.auto defaults to true and merges across layers", async () => {
