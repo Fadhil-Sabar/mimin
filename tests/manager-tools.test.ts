@@ -167,4 +167,33 @@ describe("restricted verification tool", () => {
     expect(missing).toMatchObject({ isError: true });
     expect(JSON.stringify(missing)).toContain("no typecheck script");
   });
+
+  test("adds compact context only after the same verification failure repeats", async () => {
+    const root = await workspace();
+    let exitCode = 7;
+    const spawn: VerificationSpawn = () => ({
+      stdout: new Response("same output").body,
+      stderr: new Response("same failure").body,
+      exited: Promise.resolve(exitCode),
+      exitCode,
+    });
+    const tool = createVerificationTool({ workspace: root, spawn });
+
+    const first = await execute(tool, { action: "test" });
+    const repeated = await execute(tool, { action: "test" });
+    if (typeof first === "string" || typeof repeated === "string") {
+      throw new Error("expected structured results");
+    }
+    expect(first.text).not.toContain("consecutive times");
+    expect(repeated.text).toContain(
+      "Verification has failed with the same result 2 consecutive times.",
+    );
+
+    exitCode = 0;
+    const passed = await execute(tool, { action: "test" });
+    expect(JSON.stringify(passed)).not.toContain("consecutive times");
+    exitCode = 7;
+    const laterFailure = await execute(tool, { action: "test" });
+    expect(JSON.stringify(laterFailure)).not.toContain("consecutive times");
+  });
 });

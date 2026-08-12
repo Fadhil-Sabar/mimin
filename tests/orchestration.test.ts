@@ -21,6 +21,11 @@ import {
 } from "../src/agent/sidekick.js";
 import { SessionStore } from "../src/session/session.js";
 import { createDelegateTool } from "../src/tools/delegate.js";
+import {
+  DelegationTracker,
+  gitWorkspaceState,
+  normalizeDelegationTask,
+} from "../src/tools/delegation-tracker.js";
 import type { AnyAgentTool, ToolExecutionContext } from "../src/agent/types.js";
 
 const temporaryDirectories: string[] = [];
@@ -40,6 +45,16 @@ async function fixture(): Promise<{ workspace: string; dataDir: string }> {
   const dataDir = join(root, "data");
   await Bun.write(join(workspace, ".keep"), "fixture");
   return { workspace, dataDir };
+}
+
+async function git(workspace: string, args: string[]): Promise<void> {
+  const process = Bun.spawn(["git", ...args], {
+    cwd: workspace,
+    stdin: "ignore",
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  expect(await process.exited).toBe(0);
 }
 
 const model: Model<Api> = {
@@ -112,6 +127,7 @@ function result(
 function executionContext(
   toolName: string,
   signal?: AbortSignal,
+  turn = 1,
 ): ToolExecutionContext {
   const toolCall: ToolCall = {
     type: "toolCall",
@@ -119,15 +135,16 @@ function executionContext(
     name: toolName,
     arguments: {},
   };
-  return { model, turn: 1, toolCall, ...(signal ? { signal } : {}) };
+  return { model, turn, toolCall, ...(signal ? { signal } : {}) };
 }
 
 async function execute(
   tool: AnyAgentTool,
   args: Record<string, unknown>,
   signal?: AbortSignal,
+  turn?: number,
 ) {
-  return tool.execute(args, executionContext(tool.name, signal));
+  return tool.execute(args, executionContext(tool.name, signal, turn));
 }
 
 describe("role permission boundaries", () => {
@@ -273,6 +290,299 @@ describe("isolated compact sidekick results", () => {
 });
 
 describe("manager correction and bounded delegation", () => {
+  test("normalizes equivalent task contracts deterministically", () => {
+    expect(normalizeDelegationTask("Fix auth tests")).toBe("fix auth tests");
+    expect(normalizeDelegationTask("  fix   AUTH tests  ")).toBe("fix auth tests");
+  });
+
+  test("detects same-line content changes in the fixed Git workspace signal", async () => {
+    const { workspace } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    await git(workspace, ["add", ".keep"]);
+    await git(workspace, [
+      "-c", "user.name=mimin test",
+      "-c", "user.email=mimin@example.invalid",
+      "commit", "--quiet", "-m", "initial",
+    ]);
+    const reader = gitWorkspaceState(workspace);
+
+    await Bun.write(join(workspace, ".keep"), "alpha\n");
+    const alpha = await reader.read();
+    await Bun.write(join(workspace, ".keep"), "bravo\n");
+    const bravo = await reader.read();
+
+    // Both diffs replace one line, so a numstat-only signal would collide.
+    expect(alpha).toBeDefined();
+    expect(bravo).toBeDefined();
+    expect(bravo).not.toBe(alpha);
+  });
+
+  test("skips duplicate equivalent tasks in the same parallel delegation batch", async () => {
+    let launches = 0;
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        await Bun.sleep(10);
+        return result("partial", `session-${context.index}`, "still failing");
+      },
+    });
+
+    const output = await execute(delegate, {
+      task: ["Fix auth tests", "  fix   AUTH tests  "],
+    });
+    if (typeof output === "string") throw new Error("expected structured tool output");
+    const parsed = JSON.parse(output.text) as SidekickResult[];
+
+    expect(launches).toBe(1);
+    expect(parsed[0]?.status).toBe("partial");
+    expect(parsed[1]).toMatchObject({
+      status: "blocked",
+      summary: "Delegation skipped: an equivalent task was already dispatched in this manager response.",
+    });
+  });
+
+  test("blocks the fourth equivalent no-progress delegation but allows three attempts", async () => {
+    let launches = 0;
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        return result("partial", `session-${context.index}`, "verification still fails");
+      },
+    });
+
+    const first = await execute(delegate, { task: "Fix auth tests" }, undefined, 1);
+    const second = await execute(delegate, { task: " fix   auth tests " }, undefined, 2);
+    const third = await execute(delegate, { task: "FIX AUTH TESTS" }, undefined, 3);
+    const blocked = await execute(delegate, { task: "Fix auth tests" }, undefined, 4);
+
+    expect(launches).toBe(3);
+    expect(JSON.stringify(first)).toContain("(1/3)");
+    expect(JSON.stringify(second)).toContain("(2/3)");
+    expect(JSON.stringify(third)).toContain("(3/3)");
+    expect(blocked).toMatchObject({ isError: false });
+    expect(JSON.stringify(blocked)).toContain("already been attempted 3 times");
+  });
+
+  test("keeps retry state scoped to one manager run and returns the block to the manager", async () => {
+    const { workspace, dataDir } = await fixture();
+    let launches = 0;
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const responses = [
+      "Fix auth tests",
+      " fix   AUTH tests ",
+      "FIX AUTH TESTS",
+      "Fix auth tests",
+    ].map((task, index) => assistant([
+      {
+        type: "toolCall",
+        id: `delegate-${index}`,
+        name: "delegate",
+        arguments: { task },
+      },
+    ], "toolUse"));
+    responses.push(assistant([{ type: "text", text: "Stopped retrying." }]));
+    const contexts: Context[] = [];
+    const stream = (_model: Model<Api>, context: Context) => {
+      contexts.push(structuredClone(context));
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected manager turn");
+      return completedStream(response);
+    };
+
+    const output = await runManager({
+      input: "Fix the auth tests",
+      workspace,
+      config: config(dataDir),
+      model,
+      stream,
+      delegationTracker: tracker,
+      sidekickRunner: async (_task, context) => {
+        launches += 1;
+        return result("partial", `session-${context.index}`, "still failing");
+      },
+    });
+
+    expect(output.status).toBe("completed");
+    expect(launches).toBe(3);
+    expect(JSON.stringify(contexts[4]?.messages)).toContain(
+      "already been attempted 3 times",
+    );
+  });
+
+  test("uses the default fixed Git signal to block repeated no-progress manager delegation", async () => {
+    const { workspace, dataDir } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    await git(workspace, ["add", ".keep"]);
+    await git(workspace, [
+      "-c", "user.name=mimin test",
+      "-c", "user.email=mimin@example.invalid",
+      "commit", "--quiet", "-m", "initial",
+    ]);
+    let launches = 0;
+    const responses = Array.from({ length: 4 }, (_, index) => assistant([
+      {
+        type: "toolCall",
+        id: `delegate-${index}`,
+        name: "delegate",
+        arguments: { task: "Fix auth tests" },
+      },
+    ], "toolUse"));
+    responses.push(assistant([{ type: "text", text: "Stopped retrying." }]));
+    const stream = (_model: Model<Api>, _context: Context) => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected manager turn");
+      return completedStream(response);
+    };
+
+    const output = await runManager({
+      input: "Fix the auth tests",
+      workspace,
+      config: config(dataDir),
+      model,
+      stream,
+      sidekickRunner: async (_task, context) => {
+        launches += 1;
+        return result("partial", `session-${context.index}`, "still failing");
+      },
+    });
+
+    expect(output.status).toBe("completed");
+    expect(launches).toBe(3);
+    expect(JSON.stringify(output.messages)).toContain("already been attempted 3 times");
+  });
+
+  test("does not launch duplicate equivalent delegate calls from one manager response", async () => {
+    const { workspace, dataDir } = await fixture();
+    let launches = 0;
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const responses = [
+      assistant([
+        {
+          type: "toolCall",
+          id: "delegate-first",
+          name: "delegate",
+          arguments: { task: "Fix auth tests" },
+        },
+        {
+          type: "toolCall",
+          id: "delegate-duplicate",
+          name: "delegate",
+          arguments: { task: " fix   AUTH tests " },
+        },
+      ], "toolUse"),
+      assistant([{ type: "text", text: "Handled duplicate." }]),
+    ];
+    const contexts: Context[] = [];
+    const stream = (_model: Model<Api>, context: Context) => {
+      contexts.push(structuredClone(context));
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected manager turn");
+      return completedStream(response);
+    };
+
+    const output = await runManager({
+      input: "Fix auth tests",
+      workspace,
+      config: config(dataDir),
+      model,
+      stream,
+      delegationTracker: tracker,
+      sidekickRunner: async (_task, context) => {
+        launches += 1;
+        return result("partial", `session-${context.index}`);
+      },
+    });
+
+    expect(output.status).toBe("completed");
+    expect(launches).toBe(1);
+    expect(JSON.stringify(contexts[1]?.messages)).toContain(
+      "already dispatched in this manager response",
+    );
+  });
+
+  test("resets an equivalent task retry budget whenever the workspace changes", async () => {
+    let launches = 0;
+    let workspaceState = "clean";
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => workspaceState },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        workspaceState = `changed-${launches}`;
+        return result("partial", `session-${context.index}`, "made a corrective change");
+      },
+    });
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const output = await execute(delegate, { task: "Fix auth tests" }, undefined, attempt + 1);
+      expect(JSON.stringify(output)).not.toContain("Delegation blocked");
+      expect(JSON.stringify(output)).not.toContain("No workspace progress detected");
+    }
+
+    expect(launches).toBe(4);
+  });
+
+  test("tracks different corrective tasks independently", async () => {
+    const launched: string[] = [];
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (task, context) => {
+        launched.push(task);
+        return result("partial", `session-${context.index}`);
+      },
+    });
+
+    const output = await execute(delegate, {
+      task: ["Fix auth tests", "Fix billing tests", "Fix search tests"],
+    });
+
+    expect(launched).toEqual(["Fix auth tests", "Fix billing tests", "Fix search tests"]);
+    expect(JSON.stringify(output)).not.toContain("Delegation skipped");
+  });
+
+  test("cancellation releases a reserved task without consuming its retry budget", async () => {
+    const controller = new AbortController();
+    let launches = 0;
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        await Bun.sleep(15);
+        return result("partial", `session-${context.index}`);
+      },
+    });
+
+    const cancelled = execute(delegate, { task: "Fix auth tests" }, controller.signal, 1);
+    await Bun.sleep(3);
+    controller.abort();
+    await cancelled;
+    const retry = await execute(delegate, { task: " fix auth tests " }, undefined, 2);
+
+    expect(launches).toBe(2);
+    expect(JSON.stringify(retry)).not.toContain("Delegation blocked");
+    expect(JSON.stringify(retry)).toContain("(1/3)");
+  });
+
   test("two sequential delegate calls can perform a model-driven correction loop", async () => {
     const { workspace, dataDir } = await fixture();
     const delegatedTasks: string[] = [];

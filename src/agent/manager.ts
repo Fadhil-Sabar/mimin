@@ -9,12 +9,16 @@ import type {
   DelegateEventCallback,
   SidekickRunner,
 } from "../tools/delegate.js";
+import { DelegationTracker, gitWorkspaceState } from "../tools/delegation-tracker.js";
 import { createMemorySearchTool } from "../tools/memory-search.js";
 import type { MemorySearchSource } from "../tools/memory-search.js";
 import { createReadTool } from "../tools/read.js";
 import { createSessionSearchTool } from "../tools/session-search.js";
 import type { SessionSearchSource } from "../tools/session-search.js";
-import { createVerificationTool } from "../tools/verification.js";
+import {
+  createVerificationTool,
+  VerificationFailureTracker,
+} from "../tools/verification.js";
 import type { VerificationSpawn } from "../tools/verification.js";
 import { commandCodeCredentials, modelFromRole, type ModelResolver } from "./model.js";
 import { runAgent } from "./run.js";
@@ -57,12 +61,24 @@ export interface CreateManagerToolsOptions {
   sessionSearch?: SessionSearchSource;
   verificationSpawn?: VerificationSpawn;
   verificationTimeoutMs?: number;
+  /** Optional test seam. Production creates a fresh tracker for this tool collection. */
+  delegationTracker?: DelegationTracker;
+  /** Optional test seam. Production creates a fresh tracker for this tool collection. */
+  verificationFailureTracker?: VerificationFailureTracker;
 }
 
 /** Mechanical manager permission boundary: read, delegate, retrieval, and fixed verification. */
 export function createManagerTools(
   options: CreateManagerToolsOptions,
 ): AnyAgentTool[] {
+  // createManagerTools is called once per runManager invocation. Keep both
+  // trackers here rather than in runAgent or session storage so continuation
+  // sessions never inherit retry budgets from an earlier manager run.
+  const delegationTracker = options.delegationTracker ?? new DelegationTracker({
+    workspaceState: gitWorkspaceState(options.workspace),
+  });
+  const verificationFailureTracker =
+    options.verificationFailureTracker ?? new VerificationFailureTracker();
   const delegateOptions: CreateDelegateToolOptions = {
     sidekick: {
       workspace: options.workspace,
@@ -83,6 +99,7 @@ export function createManagerTools(
     run: options.sidekickRunner,
     maxConcurrency: options.maxDelegationConcurrency,
     onEvent: options.onDelegateEvent,
+    tracker: delegationTracker,
   };
   return [
     createReadTool(options.workspace),
@@ -101,6 +118,7 @@ export function createManagerTools(
       workspace: options.workspace,
       spawn: options.verificationSpawn,
       timeoutMs: options.verificationTimeoutMs,
+      failureTracker: verificationFailureTracker,
     }),
   ];
 }
@@ -170,6 +188,8 @@ export async function runManager(
       sessionSearch: options.sessionSearch,
       verificationSpawn: options.verificationSpawn,
       verificationTimeoutMs: options.verificationTimeoutMs,
+      delegationTracker: options.delegationTracker,
+      verificationFailureTracker: options.verificationFailureTracker,
     }),
     config: {
       ...options.runConfig,

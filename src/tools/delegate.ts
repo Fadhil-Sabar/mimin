@@ -5,6 +5,10 @@ import type {
   ToolExecutionResult,
 } from "../agent/types.js";
 import {
+  DelegationTracker,
+  type DelegationAttempt,
+} from "./delegation-tracker.js";
+import {
   runSidekick,
   type RunSidekickOptions,
   type SidekickActivityEvent,
@@ -60,11 +64,19 @@ export interface CreateDelegateToolOptions {
   /** Hard-clamped to 1..3. */
   maxConcurrency?: number;
   onEvent?: DelegateEventCallback;
+  /** Per-manager-run loop-protection state. A standalone tool receives local state. */
+  tracker?: DelegationTracker;
 }
 
 interface DelegateArguments {
   task?: string | string[];
   tasks?: string[];
+}
+
+interface PreparedTask {
+  index: number;
+  task: string;
+  attempt: DelegationAttempt;
 }
 
 const HARD_MAX_CONCURRENCY = 3;
@@ -168,6 +180,54 @@ function failedResult(error: unknown): SidekickResult {
   };
 }
 
+function blockedResult(
+  reason: "duplicate_active" | "duplicate_turn" | "retry_budget_exhausted",
+  noProgressAttempts: number,
+  retryLimit: number,
+): SidekickResult {
+  if (reason === "duplicate_active") {
+    return {
+      status: "blocked",
+      summary: "Delegation skipped: an equivalent task is already active.",
+      filesChanged: [],
+      verification: [],
+      sessionId: "unavailable",
+    };
+  }
+  if (reason === "duplicate_turn") {
+    return {
+      status: "blocked",
+      summary: "Delegation skipped: an equivalent task was already dispatched in this manager response.",
+      filesChanged: [],
+      verification: [],
+      sessionId: "unavailable",
+    };
+  }
+  return {
+    status: "blocked",
+    summary:
+      `Delegation blocked: this corrective task has already been attempted ${noProgressAttempts} times without workspace progress. ` +
+      "Inspect the current repository state and choose a different approach or finish with the unresolved issue.",
+    filesChanged: [],
+    verification: [],
+    sessionId: "unavailable",
+    detail: `No-progress retry budget: ${noProgressAttempts}/${retryLimit}.`,
+  };
+}
+
+function withProgressFeedback(
+  result: SidekickResult,
+  noProgressAttempts: number,
+  retryLimit: number,
+): SidekickResult {
+  const feedback =
+    `No workspace progress detected for this corrective task (${noProgressAttempts}/${retryLimit}).`;
+  return {
+    ...result,
+    summary: compactError(`${result.summary} ${feedback}`),
+  };
+}
+
 function productionRunner(
   sidekick: CreateDelegateToolOptions["sidekick"],
 ): SidekickRunner {
@@ -184,56 +244,52 @@ function productionRunner(
 }
 
 async function runBounded(
-  tasks: readonly string[],
+  tasks: readonly PreparedTask[],
+  taskCount: number,
   limit: number,
   runner: SidekickRunner,
   signal: AbortSignal | undefined,
   onEvent: DelegateEventCallback | undefined,
+  tracker: DelegationTracker,
+  results: SidekickResult[],
   presentation?: { model?: string },
-): Promise<SidekickResult[]> {
-  const results = new Array<SidekickResult>(tasks.length);
+): Promise<void> {
   let nextIndex = 0;
 
   const worker = async (): Promise<void> => {
     while (true) {
-      if (signal?.aborted) {
-        // Fill every not-yet-started slot with a blocked result so the
-        // manager never sees nulls for aborted tasks.
-        while (nextIndex < tasks.length) {
-          const index = nextIndex;
-          nextIndex += 1;
-          results[index] = {
-            status: "blocked",
-            summary: "Aborted by the manager.",
-            filesChanged: [],
-            verification: [],
-            sessionId: "unavailable",
-          };
-        }
-        return;
-      }
-      const index = nextIndex;
+      const item = tasks[nextIndex];
+      if (!item) return;
       nextIndex += 1;
-      const task = tasks[index];
-      if (task === undefined) return;
+      if (signal?.aborted) {
+        tracker.cancel(item.attempt);
+        results[item.index] = {
+          status: "blocked",
+          summary: "Aborted by the manager.",
+          filesChanged: [],
+          verification: [],
+          sessionId: "unavailable",
+        };
+        continue;
+      }
       await onEvent?.({
         type: "delegation_started",
-        index,
-        taskCount: tasks.length,
-        task,
+        index: item.index,
+        taskCount,
+        task: item.task,
         model: presentation?.model,
       });
       let result: SidekickResult;
       try {
         result = managerFacingResult(
-          await runner(task, {
-            index,
+          await runner(item.task, {
+            index: item.index,
             signal,
             onActivity: (activity) =>
               onEvent?.({
                 type: "sidekick_activity",
-                index,
-                taskCount: tasks.length,
+                index: item.index,
+                taskCount,
                 activity,
               }),
           }),
@@ -241,13 +297,28 @@ async function runBounded(
       } catch (error) {
         result = failedResult(error);
       }
-      results[index] = result;
+
+      if (signal?.aborted) {
+        // Cancellation is not evidence that an otherwise retryable task made
+        // no progress. Release its reservation without consuming budget.
+        tracker.cancel(item.attempt);
+      } else {
+        const completion = await tracker.finish(item.attempt);
+        if (completion.madeProgress === false) {
+          result = withProgressFeedback(
+            result,
+            completion.noProgressAttempts,
+            tracker.retryLimit(),
+          );
+        }
+      }
+      results[item.index] = result;
       await onEvent?.({
         type: "delegation_finished",
-        index,
-        taskCount: tasks.length,
+        index: item.index,
+        taskCount,
         result,
-        task,
+        task: item.task,
         model: presentation?.model,
       });
     }
@@ -256,7 +327,6 @@ async function runBounded(
   await Promise.all(
     Array.from({ length: Math.min(limit, tasks.length) }, () => worker()),
   );
-  return results;
 }
 
 /** Create the manager's bounded one-level delegation tool. */
@@ -265,10 +335,11 @@ export function createDelegateTool(
 ): AnyAgentTool {
   const limit = concurrencyLimit(options.maxConcurrency);
   const runner = options.run ?? productionRunner(options.sidekick);
+  const tracker = options.tracker ?? new DelegationTracker();
   return {
     name: "delegate",
     description:
-      "Delegate implementation. Call with { task: \"one contract\" } for a single task, or { task: [\"a\", \"b\"] } (or the legacy { tasks: [...] }) for independent parallel tasks. Exactly one of `task`/`tasks`; never both. Each task runs in a fresh isolated sidekick session; results are compact reports; max 3 concurrent.",
+      "Delegate implementation. Call with { task: \"one contract\" } for a single task, or { task: [\"a\", \"b\"] } (or the legacy { tasks: [...] }) for independent parallel tasks. Exactly one of `task`/`tasks`; never both. Each task runs in a fresh isolated sidekick session; results are compact reports; max 3 concurrent. Equivalent active tasks and repeated no-progress retries are blocked.",
     parameters: delegateParameters,
     execute: async (
       rawArguments: Record<string, unknown>,
@@ -277,12 +348,37 @@ export function createDelegateTool(
       const args = rawArguments as DelegateArguments;
       const tasks = resolveTasks(args);
       const isSingle = typeof args.task === "string";
-      const results = await runBounded(
-        tasks,
+      const results = new Array<SidekickResult>(tasks.length);
+      const prepared: PreparedTask[] = [];
+
+      // Starting each task reserves its normalized identity before the first
+      // asynchronous workspace read, preventing same-batch duplicate launches.
+      const starts = await Promise.all(
+        tasks.map((task) => tracker.begin(task, context.turn)),
+      );
+      for (const [index, start] of starts.entries()) {
+        const task = tasks[index];
+        if (task === undefined) continue;
+        if (start.allowed) {
+          prepared.push({ index, task, attempt: start.attempt });
+        } else {
+          results[index] = blockedResult(
+            start.reason,
+            start.noProgressAttempts,
+            tracker.retryLimit(),
+          );
+        }
+      }
+
+      await runBounded(
+        prepared,
+        tasks.length,
         limit,
         runner,
         context.signal,
         options.onEvent,
+        tracker,
+        results,
         { model: options.sidekick?.config.model },
       );
       const compact = isSingle ? results[0] : results;

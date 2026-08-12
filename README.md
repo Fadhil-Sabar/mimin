@@ -90,6 +90,8 @@ mimin --version
 
 During an interactive run, Escape cancels the active manager request (including running sidekicks and their shell commands) and Ctrl-C exits cleanly. Only one manager turn runs at a time.
 
+Manager delegation is protected against redundant corrective loops within a single run. Equivalent active tasks are skipped, and the fourth equivalent delegation with no Git-observed workspace progress is blocked after three attempts. Meaningful workspace changes reset that no-progress budget. This is not a manager turn limit, so legitimate long tasks remain unbounded.
+
 ### Interactive commands
 
 Slash commands are intercepted in interactive mode before any model call. Typing `/` opens an autocomplete menu; Tab applies a completion, arrow keys move the selection, and Enter confirms.

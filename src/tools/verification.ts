@@ -44,6 +44,8 @@ export interface CreateVerificationToolOptions {
   workspace: string;
   spawn?: VerificationSpawn;
   timeoutMs?: number;
+  /** Per-manager-run state when verification feedback must be shared explicitly. */
+  failureTracker?: VerificationFailureTracker;
 }
 
 interface CommandResult {
@@ -59,6 +61,51 @@ interface CommandResult {
 
 const OUTPUT_LIMIT = 8 * 1024;
 const DEFAULT_TIMEOUT_MS = 120_000;
+
+interface VerificationFailureState {
+  fingerprint: string;
+  consecutiveFailures: number;
+}
+
+/**
+ * Tracks only the latest safe, bounded verification outcome per action. It is
+ * intentionally in-memory and owned by a single verification tool instance.
+ */
+export class VerificationFailureTracker {
+  private readonly failures = new Map<string, VerificationFailureState>();
+
+  record(
+    action: string,
+    ok: boolean,
+    outcome: unknown,
+  ): number | undefined {
+    if (ok) {
+      this.failures.delete(action);
+      return undefined;
+    }
+    const fingerprint = JSON.stringify(outcome);
+    const previous = this.failures.get(action);
+    const consecutiveFailures = previous?.fingerprint === fingerprint
+      ? previous.consecutiveFailures + 1
+      : 1;
+    this.failures.set(action, { fingerprint, consecutiveFailures });
+    return consecutiveFailures > 1 ? consecutiveFailures : undefined;
+  }
+}
+
+function withRepeatedFailureContext<T extends Record<string, unknown>>(
+  details: T,
+  consecutiveFailures: number | undefined,
+): T & { repeatedFailure?: { consecutiveFailures: number; summary: string } } {
+  if (consecutiveFailures === undefined) return details;
+  return {
+    ...details,
+    repeatedFailure: {
+      consecutiveFailures,
+      summary: `Verification has failed with the same result ${consecutiveFailures} consecutive times.`,
+    },
+  };
+}
 
 function sanitize(value: string): string {
   return value
@@ -203,6 +250,7 @@ export function createVerificationTool(
   options: CreateVerificationToolOptions,
 ): AnyAgentTool {
   const spawn = options.spawn ?? (Bun.spawn as unknown as VerificationSpawn);
+  const failureTracker = options.failureTracker ?? new VerificationFailureTracker();
   return {
     name: "verification",
     description:
@@ -227,7 +275,11 @@ export function createVerificationTool(
       const workspace = await realpath(resolve(options.workspace));
       const selected = await commandsFor(action as VerificationAction, workspace);
       if (selected.missing) {
-        const details = { action, cwd: ".", ok: false, error: selected.missing, results: [] };
+        const baseDetails = { action, cwd: ".", ok: false, error: selected.missing, results: [] };
+        const details = withRepeatedFailureContext(
+          baseDetails,
+          failureTracker.record(action, false, baseDetails),
+        );
         return { text: JSON.stringify(details), details, isError: true };
       }
       const results: CommandResult[] = [];
@@ -240,12 +292,16 @@ export function createVerificationTool(
           context.signal,
         ));
       }
-      const details = {
+      const baseDetails = {
         action,
         cwd: ".",
         ok: results.every((result) => result.ok),
         results,
       };
+      const details = withRepeatedFailureContext(
+        baseDetails,
+        failureTracker.record(action, baseDetails.ok, baseDetails),
+      );
       return {
         text: JSON.stringify(details),
         details,
