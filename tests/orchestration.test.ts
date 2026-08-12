@@ -768,6 +768,25 @@ describe("dispatch-time workspace progress tracking", () => {
     expect(changed).not.toContain("export const");
   });
 
+  test("keeps the untracked contents fingerprint bounded for oversized files", async () => {
+    const { workspace } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    const reader = gitWorkspaceState(workspace);
+    const large = "x".repeat(300 * 1024);
+    await Bun.write(join(workspace, "big.bin"), large);
+    const first = await reader.read();
+    // Content beyond the per-file limit must not change the fingerprint.
+    await Bun.write(join(workspace, "big.bin"), `${large}y`);
+    const second = await reader.read();
+    const still = await reader.read();
+
+    expect(first).toBeDefined();
+    if (first === undefined || second === undefined) throw new Error("expected a defined workspace state");
+    expect(first).toBe(second);
+    expect(still).toBe(first);
+    expect(first.length).toBeLessThan(1_000);
+  });
+
   test("captures a queued task baseline only when its bounded worker dispatches", async () => {
     let state = "initial";
     let reads = 0;

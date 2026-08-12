@@ -124,7 +124,7 @@ async function commandFingerprint(workspace: string, command: string[]): Promise
   }
 }
 
-async function untrackedFingerprint(workspace: string): Promise<string | undefined> {
+async function untrackedContentsFingerprint(workspace: string): Promise<string | undefined> {
   const command = ["git", "ls-files", "--others", "--exclude-standard", "-z"];
   const [listFingerprint, listed] = await Promise.all([
     commandFingerprint(workspace, command),
@@ -163,7 +163,10 @@ async function untrackedFingerprint(workspace: string): Promise<string | undefin
         await handle.close();
       }
       totalRead += selected.byteLength;
-      records.push(`path:${fingerprintBytes(pathBytes)}:size:${stat.size}:content:${fingerprintBytes(selected)}${stat.size > selected.byteLength ? ":truncated" : ""}`);
+      const truncated = stat.size > selected.byteLength;
+      // Content beyond the cap must not influence the fingerprint: only the
+      // bounded prefix (and whether it was truncated) is compared.
+      records.push(`path:${fingerprintBytes(pathBytes)}:size:${Math.min(stat.size, selected.byteLength)}:content:${fingerprintBytes(selected)}${truncated ? ":truncated" : ""}`);
     } catch {
       // Races and inaccessible paths must not disrupt manager orchestration.
       records.push(`path:${fingerprintBytes(pathBytes)}:unreadable`);
@@ -183,7 +186,7 @@ export function gitWorkspaceState(workspace: string): WorkspaceStateReader {
         commandFingerprint(cwd, ["git", "status", "--porcelain", "--untracked-files=normal"]),
         commandFingerprint(cwd, ["git", "diff", "--no-ext-diff", "--binary", "--"]),
         commandFingerprint(cwd, ["git", "diff", "--cached", "--no-ext-diff", "--binary", "--"]),
-        untrackedFingerprint(cwd),
+        untrackedContentsFingerprint(cwd),
       ]);
       if ([status, unstaged, staged, untracked].some((value) => value === undefined)) return undefined;
       return JSON.stringify({ status, unstaged, staged, untracked });
