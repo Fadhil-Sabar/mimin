@@ -19,6 +19,11 @@ export interface DelegationReservation {
 export interface DelegationAttempt extends DelegationReservation {
   readonly beforeWorkspaceState: string | undefined;
   readonly attempt: number;
+  readonly executionId: number;
+}
+
+function isDelegationAttempt(item: DelegationReservation): item is DelegationAttempt {
+  return "executionId" in item && typeof (item as { executionId?: unknown }).executionId === "number";
 }
 
 export type DelegationReserveResult =
@@ -96,7 +101,9 @@ async function commandFingerprint(workspace: string, command: string[]): Promise
  */
 interface UntrackedList {
   paths: string[];
-  listFingerprint: string | undefined;
+  listFingerprint: string;
+  totalPaths: number;
+  truncated: boolean;
 }
 
 async function untrackedList(workspace: string): Promise<UntrackedList | undefined> {
@@ -104,20 +111,39 @@ async function untrackedList(workspace: string): Promise<UntrackedList | undefin
   try {
     const process = Bun.spawn(command, { cwd: workspace, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const reader = process.stdout.getReader();
-    const chunks: Uint8Array[] = [];
+    // Keep exactly one fixed-size window for paths we might inspect. Continue
+    // draining and hashing the full stream so git can exit normally, but never
+    // construct the complete listing (or an unbounded list of parsed paths).
+    const retainedPaths = new Uint8Array(MAX_UNTRACKED_LIST_BYTES);
     let retained = 0;
     let hash = 2_166_136_261;
     let size = 0;
+    let pathStart = 0;
+    let retainPath = true;
+    let totalPaths = 0;
+    const paths: string[] = [];
+    const decoder = new TextDecoder();
     try {
       while (true) {
         const chunk = await reader.read();
         if (chunk.done) break;
         hash = hashBytes(chunk.value, hash);
         size += chunk.value.byteLength;
-        const selected = chunk.value.subarray(0, Math.max(0, MAX_UNTRACKED_LIST_BYTES - retained));
-        if (selected.byteLength > 0) {
-          chunks.push(selected);
-          retained += selected.byteLength;
+        for (const byte of chunk.value) {
+          if (retainPath && retained < MAX_UNTRACKED_LIST_BYTES) {
+            retainedPaths[retained] = byte;
+            retained += 1;
+          } else {
+            retainPath = false;
+          }
+          if (byte !== 0) continue;
+          totalPaths += 1;
+          if (retainPath) {
+            const path = decoder.decode(retainedPaths.subarray(pathStart, retained - 1));
+            if (path) paths.push(path);
+          }
+          pathStart = retained;
+          retainPath = paths.length < MAX_UNTRACKED_FILES && retained < MAX_UNTRACKED_LIST_BYTES;
         }
       }
     } finally {
@@ -125,16 +151,12 @@ async function untrackedList(workspace: string): Promise<UntrackedList | undefin
     }
     if (await process.exited !== 0) return undefined;
     const listFingerprint = `${size}:${(hash >>> 0).toString(16)}`;
-    const output = new Uint8Array(retained);
-    let offset = 0;
-    for (const chunk of chunks) {
-      output.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    const decoded = new TextDecoder().decode(output);
-    const entries = decoded.split("\0");
-    if (!decoded.endsWith("\0")) entries.pop();
-    return { paths: entries.filter(Boolean), listFingerprint };
+    return {
+      paths,
+      listFingerprint,
+      totalPaths,
+      truncated: paths.length < totalPaths,
+    };
   } catch {
     return undefined;
   }
@@ -144,7 +166,11 @@ async function untrackedContentsFingerprint(workspace: string): Promise<string |
   const listed = await untrackedList(workspace);
   if (listed === undefined) return undefined;
   // Preserve a fingerprint of Git's complete list, even when content reading is bounded.
-  const records: string[] = [`list:${listed.listFingerprint}`, `listed:${listed.paths.length}`];
+  const records: string[] = [
+    `list:${listed.listFingerprint}`,
+    `listed:${listed.totalPaths}`,
+    `truncated:${listed.truncated}`,
+  ];
   let totalRead = 0;
   for (const relative of listed.paths.slice(0, MAX_UNTRACKED_FILES)) {
     const pathBytes = new TextEncoder().encode(relative);
@@ -180,7 +206,7 @@ async function untrackedContentsFingerprint(workspace: string): Promise<string |
       records.push(`path:${fingerprintBytes(pathBytes)}:unreadable`);
     }
   }
-  if (listed.paths.length > MAX_UNTRACKED_FILES) records.push(`files-bounded:${listed.paths.length - MAX_UNTRACKED_FILES}`);
+  if (listed.totalPaths > listed.paths.length) records.push(`files-bounded:${listed.totalPaths - listed.paths.length}`);
   return fingerprintBytes(new TextEncoder().encode(records.join("\n")));
 }
 
@@ -206,6 +232,9 @@ export function gitWorkspaceState(workspace: string): WorkspaceStateReader {
 export class DelegationTracker {
   private readonly states = new Map<string, DelegationAttemptState>();
   private readonly maxNoProgressAttempts: number;
+  private readonly activeExecutions = new Set<number>();
+  private readonly ambiguousExecutions = new Set<number>();
+  private nextExecutionId = 1;
 
   constructor(private readonly options: DelegationTrackerOptions = {}) {
     const configured = options.maxNoProgressAttempts;
@@ -233,13 +262,22 @@ export class DelegationTracker {
       return { allowed: false, reason: "retry_budget_exhausted", noProgressAttempts: state.noProgressAttempts };
     }
     state.attempts += 1;
-    return { allowed: true, attempt: { ...reservation, beforeWorkspaceState, attempt: state.attempts } };
+    const executionId = this.nextExecutionId++;
+    if (this.activeExecutions.size > 0) {
+      for (const activeExecution of this.activeExecutions) this.ambiguousExecutions.add(activeExecution);
+      this.ambiguousExecutions.add(executionId);
+    }
+    this.activeExecutions.add(executionId);
+    return { allowed: true, attempt: { ...reservation, beforeWorkspaceState, attempt: state.attempts, executionId } };
   }
 
   async finish(attempt: DelegationAttempt): Promise<DelegationCompletion> {
     const state = this.states.get(attempt.fingerprint);
     if (!state) return { madeProgress: undefined, noProgressAttempts: 0 };
     state.active = false;
+    this.activeExecutions.delete(attempt.executionId);
+    const ambiguous = this.ambiguousExecutions.delete(attempt.executionId);
+    if (ambiguous) return { madeProgress: undefined, noProgressAttempts: state.noProgressAttempts };
     const afterWorkspaceState = await this.options.workspaceState?.read();
     if (attempt.beforeWorkspaceState === undefined || afterWorkspaceState === undefined) return { madeProgress: undefined, noProgressAttempts: state.noProgressAttempts };
     state.lastWorkspaceState = afterWorkspaceState;
@@ -255,6 +293,10 @@ export class DelegationTracker {
   cancel(item: DelegationReservation): void {
     const state = this.states.get(item.fingerprint);
     if (state) state.active = false;
+    if (isDelegationAttempt(item)) {
+      this.activeExecutions.delete(item.executionId);
+      this.ambiguousExecutions.delete(item.executionId);
+    }
   }
 
   retryLimit(): number { return this.maxNoProgressAttempts; }

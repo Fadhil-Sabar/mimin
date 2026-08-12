@@ -752,6 +752,57 @@ describe("manager correction and bounded delegation", () => {
 });
 
 describe("dispatch-time workspace progress tracking", () => {
+  test("marks every overlapping execution attribution-unknown without changing retry state", async () => {
+    let workspaceState = "initial";
+    const tracker = new DelegationTracker({ workspaceState: { read: async () => workspaceState } });
+
+    const firstReservation = tracker.reserve("Fix auth", 1);
+    if (!firstReservation.allowed) throw new Error("expected first reservation");
+    const firstStarted = await tracker.start(firstReservation.reservation);
+    if (!firstStarted.allowed) throw new Error("expected first start");
+    const secondReservation = tracker.reserve("Fix billing", 1);
+    if (!secondReservation.allowed) throw new Error("expected second reservation");
+    const secondStarted = await tracker.start(secondReservation.reservation);
+    if (!secondStarted.allowed) throw new Error("expected second start");
+
+    workspaceState = "changed-by-first-sidekick";
+    expect(await tracker.finish(firstStarted.attempt)).toEqual({ madeProgress: undefined, noProgressAttempts: 0 });
+    expect(await tracker.finish(secondStarted.attempt)).toEqual({ madeProgress: undefined, noProgressAttempts: 0 });
+
+    // Once the overlapping attempts have ended, an isolated unchanged retry is
+    // deterministically counted as its first no-progress attempt.
+    const retryReservation = tracker.reserve("Fix billing", 2);
+    if (!retryReservation.allowed) throw new Error("expected retry reservation");
+    const retryStarted = await tracker.start(retryReservation.reservation);
+    if (!retryStarted.allowed) throw new Error("expected retry start");
+    expect(await tracker.finish(retryStarted.attempt)).toEqual({ madeProgress: false, noProgressAttempts: 1 });
+  });
+
+  test("an ambiguous overlap neither resets nor increments accumulated no-progress attempts", async () => {
+    let workspaceState = "unchanged";
+    const tracker = new DelegationTracker({ workspaceState: { read: async () => workspaceState } });
+    for (let turn = 1; turn <= 2; turn += 1) {
+      const reservation = tracker.reserve("Fix billing", turn);
+      if (!reservation.allowed) throw new Error("expected reservation");
+      const started = await tracker.start(reservation.reservation);
+      if (!started.allowed) throw new Error("expected start");
+      expect(await tracker.finish(started.attempt)).toMatchObject({ madeProgress: false, noProgressAttempts: turn });
+    }
+
+    const billingReservation = tracker.reserve("Fix billing", 3);
+    if (!billingReservation.allowed) throw new Error("expected billing reservation");
+    const billingStarted = await tracker.start(billingReservation.reservation);
+    if (!billingStarted.allowed) throw new Error("expected billing start");
+    const authReservation = tracker.reserve("Fix auth", 3);
+    if (!authReservation.allowed) throw new Error("expected auth reservation");
+    const authStarted = await tracker.start(authReservation.reservation);
+    if (!authStarted.allowed) throw new Error("expected auth start");
+    workspaceState = "changed-by-auth";
+
+    expect(await tracker.finish(billingStarted.attempt)).toEqual({ madeProgress: undefined, noProgressAttempts: 2 });
+    expect(await tracker.finish(authStarted.attempt)).toEqual({ madeProgress: undefined, noProgressAttempts: 0 });
+  });
+
   test("fingerprints untracked file content changes without exposing contents", async () => {
     const { workspace } = await fixture();
     await git(workspace, ["init", "--quiet"]);
@@ -785,6 +836,29 @@ describe("dispatch-time workspace progress tracking", () => {
     expect(first).toBe(second);
     expect(still).toBe(first);
     expect(first.length).toBeLessThan(1_000);
+  });
+
+  test("keeps a large untracked listing compact, stable, and sensitive to retained paths", async () => {
+    const { workspace } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    const reader = gitWorkspaceState(workspace);
+    await Promise.all(Array.from({ length: 150 }, async (_, index) => {
+      await Bun.write(join(workspace, `entry-${String(index).padStart(3, "0")}.ts`), `export const value = ${index};\n`);
+    }));
+    const first = await reader.read();
+    const stable = await reader.read();
+    await Bun.write(join(workspace, "entry-000.ts"), "export const value = changed;\n");
+    const changed = await reader.read();
+    await Bun.write(join(workspace, "entry-150.ts"), "export const value = added;\n");
+    const laterPathChanged = await reader.read();
+
+    expect(first).toBeDefined();
+    expect(first).toBe(stable);
+    expect(first?.length).toBeLessThan(1_000);
+    expect(changed).not.toBe(first);
+    // Paths past the first 100 are not content-inspected, but the streaming
+    // full-list fingerprint still detects their addition without retaining it.
+    expect(laterPathChanged).not.toBe(changed);
   });
 
   test("captures a queued task baseline only when its bounded worker dispatches", async () => {
@@ -867,6 +941,31 @@ describe("dispatch-time workspace progress tracking", () => {
     const retry = await execute(delegate, { task: "second" }, undefined, 2);
     expect(JSON.stringify(retry)).not.toContain("Delegation blocked");
     expect(JSON.stringify(retry)).toContain("(1/3)");
+  });
+
+  test("running cancellation clears overlapping execution bookkeeping", async () => {
+    const controller = new AbortController();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tracker = new DelegationTracker({ workspaceState: { read: async () => "unchanged" } });
+    const delegate = createDelegateTool({
+      tracker,
+      maxConcurrency: 2,
+      run: async (_task, context) => {
+        if (context.index < 2) await gate;
+        return result("partial", `session-${context.index}`, "cancelled work");
+      },
+    });
+    const pending = execute(delegate, { task: ["Fix auth", "Fix billing"] }, controller.signal, 1);
+    await Bun.sleep(5);
+    controller.abort();
+    release?.();
+    await pending;
+
+    // A later isolated retry is neither blocked as active nor left ambiguous.
+    const retry = await execute(delegate, { task: "Fix auth" }, undefined, 2);
+    expect(JSON.stringify(retry)).toContain("No workspace progress detected for this corrective task (1/3)");
+    expect(JSON.stringify(retry)).not.toContain("already active");
   });
 
   test("retry-budget rejection releases the reservation for a later corrected task", async () => {
