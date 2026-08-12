@@ -83,7 +83,7 @@ export class VerificationFailureTracker {
       this.failures.delete(action);
       return undefined;
     }
-    const fingerprint = JSON.stringify(outcome);
+    const fingerprint = stableFailureFingerprint(action, outcome);
     const previous = this.failures.get(action);
     const consecutiveFailures = previous?.fingerprint === fingerprint
       ? previous.consecutiveFailures + 1
@@ -105,6 +105,35 @@ function withRepeatedFailureContext<T extends Record<string, unknown>>(
       summary: `Verification has failed with the same result ${consecutiveFailures} consecutive times.`,
     },
   };
+}
+
+function stableFailureSignature(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return sanitize(value)
+    .replace(/\b\d+(?:\.\d+)?\s*(?:ms|s|seconds?)\b/gi, "<time>")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 512);
+}
+
+function stableFailureFingerprint(action: string, outcome: unknown): string {
+  const details = outcome && typeof outcome === "object" ? outcome as Record<string, unknown> : {};
+  const results = Array.isArray(details.results) ? details.results : [];
+  return JSON.stringify({
+    action,
+    ok: details.ok === true,
+    error: stableFailureSignature(details.error),
+    results: results.map((item) => {
+      const result = item && typeof item === "object" ? item as Record<string, unknown> : {};
+      return {
+        command: typeof result.command === "string" ? result.command : "",
+        exitCode: typeof result.exitCode === "number" || result.exitCode === null ? result.exitCode : null,
+        ok: result.ok === true,
+        timedOut: result.timedOut === true,
+        signature: stableFailureSignature(result.stderr) || stableFailureSignature(result.stdout),
+      };
+    }),
+  });
 }
 
 function sanitize(value: string): string {

@@ -1,25 +1,33 @@
-import { realpath } from "node:fs/promises";
+import { lstat, open, realpath } from "node:fs/promises";
+import { join } from "node:path";
 
 export const MAX_NO_PROGRESS_DELEGATION_ATTEMPTS = 3;
+const MAX_UNTRACKED_FILES = 100;
+const MAX_UNTRACKED_FILE_BYTES = 256 * 1024;
+const MAX_UNTRACKED_TOTAL_BYTES = 2 * 1024 * 1024;
+const MAX_UNTRACKED_LIST_BYTES = 1024 * 1024;
 
 export interface WorkspaceStateReader {
   read(): Promise<string | undefined>;
 }
 
-export interface DelegationAttempt {
+export interface DelegationReservation {
   readonly fingerprint: string;
   readonly task: string;
+}
+
+export interface DelegationAttempt extends DelegationReservation {
   readonly beforeWorkspaceState: string | undefined;
   readonly attempt: number;
 }
 
+export type DelegationReserveResult =
+  | { allowed: true; reservation: DelegationReservation }
+  | { allowed: false; reason: "duplicate_active" | "duplicate_turn"; noProgressAttempts: number };
+
 export type DelegationStartResult =
   | { allowed: true; attempt: DelegationAttempt }
-  | {
-      allowed: false;
-      reason: "duplicate_active" | "duplicate_turn" | "retry_budget_exhausted";
-      noProgressAttempts: number;
-    };
+  | { allowed: false; reason: "retry_budget_exhausted"; noProgressAttempts: number };
 
 export interface DelegationCompletion {
   madeProgress: boolean | undefined;
@@ -45,180 +53,198 @@ export function normalizeDelegationTask(task: string): string {
   return task.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-async function commandFingerprint(
+function hashBytes(bytes: Uint8Array, initial = 2_166_136_261): number {
+  let hash = initial;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return hash;
+}
+
+function fingerprintBytes(bytes: Uint8Array): string {
+  return `${bytes.byteLength}:${(hashBytes(bytes) >>> 0).toString(16)}`;
+}
+
+async function commandOutput(
   workspace: string,
   command: string[],
-): Promise<string | undefined> {
+  maxBytes: number,
+): Promise<Uint8Array | undefined> {
   try {
-    const process = Bun.spawn(command, {
-      cwd: workspace,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    });
+    const process = Bun.spawn(command, { cwd: workspace, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
     const reader = process.stdout.getReader();
-    // A small, non-cryptographic streaming fingerprint is enough to compare
-    // two fixed Git command outputs. It avoids retaining or exposing patch
-    // content while still distinguishing same-line-count edits.
+    const chunks: Uint8Array[] = [];
+    let retained = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        const selected = chunk.value.subarray(0, Math.max(0, maxBytes - retained));
+        if (selected.byteLength > 0) {
+          chunks.push(selected);
+          retained += selected.byteLength;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (await process.exited !== 0) return undefined;
+    const output = new Uint8Array(retained);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return output;
+  } catch {
+    return undefined;
+  }
+}
+
+async function commandFingerprint(workspace: string, command: string[]): Promise<string | undefined> {
+  try {
+    const process = Bun.spawn(command, { cwd: workspace, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const reader = process.stdout.getReader();
     let hash = 2_166_136_261;
     let size = 0;
     try {
       while (true) {
         const chunk = await reader.read();
         if (chunk.done) break;
-        for (const byte of chunk.value) {
-          hash ^= byte;
-          hash = Math.imul(hash, 16_777_619);
-          size += 1;
-        }
+        hash = hashBytes(chunk.value, hash);
+        size += chunk.value.byteLength;
       }
     } finally {
       reader.releaseLock();
     }
-    const exitCode = await process.exited;
-    return exitCode === 0 ? `${size}:${(hash >>> 0).toString(16)}` : undefined;
+    return await process.exited === 0 ? `${size}:${(hash >>> 0).toString(16)}` : undefined;
   } catch {
     return undefined;
   }
 }
 
-/**
- * Read a lightweight, fixed Git representation of the workspace. It never
- * exposes a shell surface to the manager and fingerprints only Git's changed
- * patches, never the full workspace or patch contents.
- */
+async function untrackedFingerprint(workspace: string): Promise<string | undefined> {
+  const command = ["git", "ls-files", "--others", "--exclude-standard", "-z"];
+  const [listFingerprint, listed] = await Promise.all([
+    commandFingerprint(workspace, command),
+    commandOutput(workspace, command, MAX_UNTRACKED_LIST_BYTES),
+  ]);
+  if (listFingerprint === undefined || listed === undefined) return undefined;
+  // Preserve a fingerprint of Git's complete list, even when content reading is bounded.
+  const decoded = new TextDecoder().decode(listed);
+  const entries = decoded.split("\0");
+  if (!decoded.endsWith("\0")) entries.pop();
+  const paths = entries.filter(Boolean);
+  const records: string[] = [`list:${listFingerprint}`, `listed:${paths.length}`];
+  let totalRead = 0;
+  for (const relative of paths.slice(0, MAX_UNTRACKED_FILES)) {
+    const pathBytes = new TextEncoder().encode(relative);
+    try {
+      const absolute = join(workspace, relative);
+      const stat = await lstat(absolute);
+      if (!stat.isFile() || stat.isSymbolicLink()) {
+        records.push(`path:${fingerprintBytes(pathBytes)}:nonregular`);
+        continue;
+      }
+      const remaining = MAX_UNTRACKED_TOTAL_BYTES - totalRead;
+      const readLimit = Math.max(0, Math.min(MAX_UNTRACKED_FILE_BYTES, remaining));
+      if (readLimit === 0) {
+        records.push(`path:${fingerprintBytes(pathBytes)}:bounded:${stat.size}`);
+        continue;
+      }
+      const handle = await open(absolute, "r");
+      let selected: Uint8Array;
+      try {
+        const buffer = new Uint8Array(readLimit);
+        const { bytesRead } = await handle.read(buffer, 0, readLimit, 0);
+        selected = buffer.subarray(0, bytesRead);
+      } finally {
+        await handle.close();
+      }
+      totalRead += selected.byteLength;
+      records.push(`path:${fingerprintBytes(pathBytes)}:size:${stat.size}:content:${fingerprintBytes(selected)}${stat.size > selected.byteLength ? ":truncated" : ""}`);
+    } catch {
+      // Races and inaccessible paths must not disrupt manager orchestration.
+      records.push(`path:${fingerprintBytes(pathBytes)}:unreadable`);
+    }
+  }
+  if (paths.length > MAX_UNTRACKED_FILES) records.push(`files-bounded:${paths.length - MAX_UNTRACKED_FILES}`);
+  return fingerprintBytes(new TextEncoder().encode(records.join("\n")));
+}
+
+/** Read a fixed, internal Git representation without exposing workspace contents. */
 export function gitWorkspaceState(workspace: string): WorkspaceStateReader {
   return {
     async read(): Promise<string | undefined> {
       let cwd: string;
-      try {
-        cwd = await realpath(workspace);
-      } catch {
-        return undefined;
-      }
-      const [status, unstaged, staged] = await Promise.all([
+      try { cwd = await realpath(workspace); } catch { return undefined; }
+      const [status, unstaged, staged, untracked] = await Promise.all([
         commandFingerprint(cwd, ["git", "status", "--porcelain", "--untracked-files=normal"]),
         commandFingerprint(cwd, ["git", "diff", "--no-ext-diff", "--binary", "--"]),
         commandFingerprint(cwd, ["git", "diff", "--cached", "--no-ext-diff", "--binary", "--"]),
+        untrackedFingerprint(cwd),
       ]);
-      if (status === undefined || unstaged === undefined || staged === undefined) {
-        return undefined;
-      }
-      return JSON.stringify({ status, unstaged, staged });
+      if ([status, unstaged, staged, untracked].some((value) => value === undefined)) return undefined;
+      return JSON.stringify({ status, unstaged, staged, untracked });
     },
   };
 }
 
-/**
- * Per-manager-run state for repeat delegation policy. State is deliberately
- * local to the tool collection that owns this tracker, never session-global.
- */
+/** Per-manager-run state for repeat delegation policy. */
 export class DelegationTracker {
   private readonly states = new Map<string, DelegationAttemptState>();
   private readonly maxNoProgressAttempts: number;
 
   constructor(private readonly options: DelegationTrackerOptions = {}) {
     const configured = options.maxNoProgressAttempts;
-    this.maxNoProgressAttempts = Number.isFinite(configured)
-      ? Math.max(1, Math.floor(configured as number))
-      : MAX_NO_PROGRESS_DELEGATION_ATTEMPTS;
+    this.maxNoProgressAttempts = Number.isFinite(configured) ? Math.max(1, Math.floor(configured as number)) : MAX_NO_PROGRESS_DELEGATION_ATTEMPTS;
   }
 
-  async begin(task: string, turn?: number): Promise<DelegationStartResult> {
+  reserve(task: string, turn?: number): DelegationReserveResult {
     const fingerprint = normalizeDelegationTask(task);
-    const state = this.states.get(fingerprint) ?? {
-      attempts: 0,
-      noProgressAttempts: 0,
-      active: false,
-    };
+    const state = this.states.get(fingerprint) ?? { attempts: 0, noProgressAttempts: 0, active: false };
     this.states.set(fingerprint, state);
-
-    // runAgent executes tool calls in a response in order, so a duplicate may
-    // no longer be active by the time the later call starts. Keep the response
-    // turn as deterministic orchestration state to block that waste as well.
-    if (turn !== undefined && state.lastTurn === turn) {
-      return {
-        allowed: false,
-        reason: "duplicate_turn",
-        noProgressAttempts: state.noProgressAttempts,
-      };
-    }
-    // Reserve synchronously before reading Git so concurrent duplicate calls
-    // cannot start two sidekicks for the same normalized task.
-    if (state.active) {
-      return {
-        allowed: false,
-        reason: "duplicate_active",
-        noProgressAttempts: state.noProgressAttempts,
-      };
-    }
+    if (turn !== undefined && state.lastTurn === turn) return { allowed: false, reason: "duplicate_turn", noProgressAttempts: state.noProgressAttempts };
+    if (state.active) return { allowed: false, reason: "duplicate_active", noProgressAttempts: state.noProgressAttempts };
     state.active = true;
     state.lastTurn = turn;
+    return { allowed: true, reservation: { fingerprint, task } };
+  }
 
+  async start(reservation: DelegationReservation): Promise<DelegationStartResult> {
+    const state = this.states.get(reservation.fingerprint);
+    if (!state) return { allowed: false, reason: "retry_budget_exhausted", noProgressAttempts: 0 };
     const beforeWorkspaceState = await this.options.workspaceState?.read();
-    // A changed baseline means an earlier lack of progress is no longer enough
-    // evidence to block this corrective attempt.
-    if (
-      beforeWorkspaceState !== undefined &&
-      state.lastWorkspaceState !== undefined &&
-      beforeWorkspaceState !== state.lastWorkspaceState
-    ) {
-      state.noProgressAttempts = 0;
-    }
+    if (beforeWorkspaceState !== undefined && state.lastWorkspaceState !== undefined && beforeWorkspaceState !== state.lastWorkspaceState) state.noProgressAttempts = 0;
     if (state.noProgressAttempts >= this.maxNoProgressAttempts) {
       state.active = false;
-      return {
-        allowed: false,
-        reason: "retry_budget_exhausted",
-        noProgressAttempts: state.noProgressAttempts,
-      };
+      return { allowed: false, reason: "retry_budget_exhausted", noProgressAttempts: state.noProgressAttempts };
     }
-
     state.attempts += 1;
-    return {
-      allowed: true,
-      attempt: {
-        fingerprint,
-        task,
-        beforeWorkspaceState,
-        attempt: state.attempts,
-      },
-    };
+    return { allowed: true, attempt: { ...reservation, beforeWorkspaceState, attempt: state.attempts } };
   }
 
   async finish(attempt: DelegationAttempt): Promise<DelegationCompletion> {
     const state = this.states.get(attempt.fingerprint);
     if (!state) return { madeProgress: undefined, noProgressAttempts: 0 };
     state.active = false;
-
     const afterWorkspaceState = await this.options.workspaceState?.read();
-    if (
-      attempt.beforeWorkspaceState === undefined ||
-      afterWorkspaceState === undefined
-    ) {
-      return {
-        madeProgress: undefined,
-        noProgressAttempts: state.noProgressAttempts,
-      };
-    }
-
+    if (attempt.beforeWorkspaceState === undefined || afterWorkspaceState === undefined) return { madeProgress: undefined, noProgressAttempts: state.noProgressAttempts };
     state.lastWorkspaceState = afterWorkspaceState;
     if (afterWorkspaceState !== attempt.beforeWorkspaceState) {
       state.noProgressAttempts = 0;
       return { madeProgress: true, noProgressAttempts: 0 };
     }
-
     state.noProgressAttempts += 1;
     return { madeProgress: false, noProgressAttempts: state.noProgressAttempts };
   }
 
-  /** Release a reserved but never-dispatched task without treating it as failed work. */
-  cancel(attempt: DelegationAttempt): void {
-    const state = this.states.get(attempt.fingerprint);
+  /** Release a reserved or started task without treating cancellation as failed work. */
+  cancel(item: DelegationReservation): void {
+    const state = this.states.get(item.fingerprint);
     if (state) state.active = false;
   }
 
-  retryLimit(): number {
-    return this.maxNoProgressAttempts;
-  }
+  retryLimit(): number { return this.maxNoProgressAttempts; }
 }

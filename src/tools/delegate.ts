@@ -6,7 +6,7 @@ import type {
 } from "../agent/types.js";
 import {
   DelegationTracker,
-  type DelegationAttempt,
+  type DelegationReservation,
 } from "./delegation-tracker.js";
 import {
   runSidekick,
@@ -76,7 +76,7 @@ interface DelegateArguments {
 interface PreparedTask {
   index: number;
   task: string;
-  attempt: DelegationAttempt;
+  reservation: DelegationReservation;
 }
 
 const HARD_MAX_CONCURRENCY = 3;
@@ -262,7 +262,7 @@ async function runBounded(
       if (!item) return;
       nextIndex += 1;
       if (signal?.aborted) {
-        tracker.cancel(item.attempt);
+        tracker.cancel(item.reservation);
         results[item.index] = {
           status: "blocked",
           summary: "Aborted by the manager.",
@@ -272,6 +272,16 @@ async function runBounded(
         };
         continue;
       }
+      const started = await tracker.start(item.reservation);
+      if (!started.allowed) {
+        results[item.index] = blockedResult(
+          started.reason,
+          started.noProgressAttempts,
+          tracker.retryLimit(),
+        );
+        continue;
+      }
+      const attempt = started.attempt;
       await onEvent?.({
         type: "delegation_started",
         index: item.index,
@@ -301,9 +311,9 @@ async function runBounded(
       if (signal?.aborted) {
         // Cancellation is not evidence that an otherwise retryable task made
         // no progress. Release its reservation without consuming budget.
-        tracker.cancel(item.attempt);
+        tracker.cancel(attempt);
       } else {
-        const completion = await tracker.finish(item.attempt);
+        const completion = await tracker.finish(attempt);
         if (completion.madeProgress === false) {
           result = withProgressFeedback(
             result,
@@ -351,16 +361,15 @@ export function createDelegateTool(
       const results = new Array<SidekickResult>(tasks.length);
       const prepared: PreparedTask[] = [];
 
-      // Starting each task reserves its normalized identity before the first
-      // asynchronous workspace read, preventing same-batch duplicate launches.
-      const starts = await Promise.all(
-        tasks.map((task) => tracker.begin(task, context.turn)),
-      );
+      // Reserve identities synchronously before workers begin, so duplicate tasks
+      // cannot launch twice. Workspace baselines are deliberately captured by the
+      // bounded worker immediately before the sidekick is dispatched.
+      const starts = tasks.map((task) => tracker.reserve(task, context.turn));
       for (const [index, start] of starts.entries()) {
         const task = tasks[index];
         if (task === undefined) continue;
         if (start.allowed) {
-          prepared.push({ index, task, attempt: start.attempt });
+          prepared.push({ index, task, reservation: start.reservation });
         } else {
           results[index] = blockedResult(
             start.reason,

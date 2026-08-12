@@ -21,6 +21,7 @@ import {
 } from "../src/agent/sidekick.js";
 import { SessionStore } from "../src/session/session.js";
 import { createDelegateTool } from "../src/tools/delegate.js";
+import { VerificationFailureTracker } from "../src/tools/verification.js";
 import {
   DelegationTracker,
   gitWorkspaceState,
@@ -747,6 +748,87 @@ describe("manager correction and bounded delegation", () => {
     // Aborted tasks are never dispatched; the workers stop after the signal.
     expect(started.length).toBeLessThan(9);
     expect(parsed.some((entry) => entry.status === "blocked")).toBe(true);
+  });
+});
+
+describe("dispatch-time workspace progress tracking", () => {
+  test("fingerprints untracked file content changes without exposing contents", async () => {
+    const { workspace } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    const reader = gitWorkspaceState(workspace);
+    await Bun.write(join(workspace, "new.ts"), "export const value = 1;\n");
+    const created = await reader.read();
+    await Bun.write(join(workspace, "new.ts"), "export const value = 2;\n");
+    const changed = await reader.read();
+    const unchanged = await reader.read();
+
+    expect(changed).toBeDefined();
+    expect(changed).not.toBe(created);
+    expect(unchanged).toBe(changed);
+    expect(changed).not.toContain("export const");
+  });
+
+  test("captures a queued task baseline only when its bounded worker dispatches", async () => {
+    let state = "initial";
+    let reads = 0;
+    let releaseFirst: (() => void) | undefined;
+    const firstRunning = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const tracker = new DelegationTracker({ workspaceState: { read: async () => { reads += 1; return state; } } });
+    const delegate = createDelegateTool({
+      tracker,
+      maxConcurrency: 1,
+      run: async (task, context) => {
+        if (context.index === 0) {
+          await firstRunning;
+          state = "changed-by-first";
+        }
+        return result("partial", `session-${context.index}`, task);
+      },
+    });
+    const pending = execute(delegate, { task: ["first", "second"] });
+    await Bun.sleep(5);
+    expect(reads).toBe(1);
+    releaseFirst?.();
+    const output = await pending;
+    expect(JSON.stringify(output)).toContain("No workspace progress detected for this corrective task (1/3)");
+  });
+
+  test("does not eagerly read workspace state for a large bounded batch", async () => {
+    let reads = 0;
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const tracker = new DelegationTracker({ workspaceState: { read: async () => { reads += 1; return "same"; } } });
+    const delegate = createDelegateTool({
+      tracker,
+      maxConcurrency: 3,
+      run: async () => { await gate; return result("complete", "session"); },
+    });
+    const pending = execute(delegate, { task: Array.from({ length: 20 }, (_, index) => `task ${index}`) });
+    await Bun.sleep(5);
+    expect(reads).toBe(3);
+    release?.();
+    await pending;
+  });
+});
+
+describe("stable verification failure tracking", () => {
+  test("treats timing-only output differences as the same failure", () => {
+    const tracker = new VerificationFailureTracker();
+    const first = { ok: false, results: [{ command: "bun test", exitCode: 1, ok: false, timedOut: false, stderr: "Tests failed in 1.42s" }] };
+    const second = { ok: false, results: [{ command: "bun test", exitCode: 1, ok: false, timedOut: false, stderr: "Tests failed in 1.47s" }] };
+
+    expect(tracker.record("test", false, first)).toBeUndefined();
+    expect(tracker.record("test", false, second)).toBe(2);
+  });
+
+  test("resets distinct failures and clears state after success", () => {
+    const tracker = new VerificationFailureTracker();
+    const failure = (exitCode: number, stderr: string) => ({ ok: false, results: [{ command: "bun test", exitCode, ok: false, timedOut: false, stderr }] });
+
+    tracker.record("test", false, failure(1, "assertion failed"));
+    expect(tracker.record("test", false, failure(2, "process crashed"))).toBeUndefined();
+    tracker.record("test", true, { ok: true, results: [] });
+    expect(tracker.record("test", false, failure(2, "process crashed"))).toBeUndefined();
   });
 });
 
