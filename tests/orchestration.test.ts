@@ -828,6 +828,138 @@ describe("dispatch-time workspace progress tracking", () => {
     release?.();
     await pending;
   });
+
+  test("queued cancellation releases the reservation without consuming an attempt or budget", async () => {
+    const controller = new AbortController();
+    let launches = 0;
+    let state = "clean";
+    let reads = 0;
+    let releaseFirst: (() => void) | undefined;
+    const firstRunning = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => { reads += 1; return state; } },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      maxConcurrency: 1,
+      run: async (_task, context) => {
+        launches += 1;
+        if (context.index === 0) {
+          await firstRunning;
+          state = "changed-by-first";
+        }
+        return result("partial", `session-${context.index}`, "still failing");
+      },
+    });
+    const pending = execute(delegate, {
+      task: ["first", "second", "third"],
+    }, controller.signal, 1);
+    // First task is running; second and third are reserved but queued.
+    await Bun.sleep(5);
+    expect(launches).toBe(1);
+    expect(reads).toBe(1);
+    controller.abort();
+    releaseFirst?.();
+    await pending;
+
+    // A fresh tracker-free run after cancellation starts a new attempt at 1/3:
+    // the queued task never consumed an attempt or no-progress budget.
+    const retry = await execute(delegate, { task: "second" }, undefined, 2);
+    expect(JSON.stringify(retry)).not.toContain("Delegation blocked");
+    expect(JSON.stringify(retry)).toContain("(1/3)");
+  });
+
+  test("retry-budget rejection releases the reservation for a later corrected task", async () => {
+    let launches = 0;
+    let state = "unchanged";
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => state },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        return result("partial", `session-${context.index}`, "no progress");
+      },
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const output = await execute(delegate, { task: "Fix auth tests" }, undefined, attempt + 1);
+      expect(JSON.stringify(output)).toContain(`(${attempt + 1}/3)`);
+    }
+    // Fourth equivalent task is rejected at start time; the reservation must be
+    // released so a genuinely different task can still launch afterwards.
+    const blocked = await execute(delegate, { task: "FIX AUTH TESTS" }, undefined, 4);
+    expect(JSON.stringify(blocked)).toContain("already been attempted 3 times");
+    // A workspace change resets the budget, and the same task must be able to
+    // launch again: the blocked start() must not have left it active.
+    state = "changed";
+    const resumed = await execute(delegate, { task: "Fix auth tests" }, undefined, 5);
+    expect(launches).toBe(4);
+    expect(JSON.stringify(resumed)).toContain("(1/3)");
+    expect(JSON.stringify(resumed)).not.toContain("already active");
+  });
+
+  test("untracked file content modification counts as delegation progress", async () => {
+    const { workspace } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    await git(workspace, ["add", ".keep"]);
+    await git(workspace, [
+      "-c", "user.name=mimin test",
+      "-c", "user.email=mimin@example.invalid",
+      "commit", "--quiet", "-m", "initial",
+    ]);
+    let launches = 0;
+    const tracker = new DelegationTracker({ workspaceState: gitWorkspaceState(workspace) });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        await Bun.write(join(workspace, "new.ts"), `export const value = ${launches};\n`);
+        return result("partial", `session-${context.index}`, "made a change");
+      },
+    });
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const output = await execute(delegate, { task: "Fix auth tests" }, undefined, attempt + 1);
+      // Rewriting the same untracked file changes its contents, so each
+      // corrective attempt counts as progress and never blocks.
+      expect(JSON.stringify(output)).not.toContain("Delegation blocked");
+      expect(JSON.stringify(output)).not.toContain("No workspace progress detected");
+    }
+    expect(launches).toBe(4);
+  });
+
+  test("unchanged untracked file counts as no progress and exhausts the budget", async () => {
+    const { workspace } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    await git(workspace, ["add", ".keep"]);
+    await git(workspace, [
+      "-c", "user.name=mimin test",
+      "-c", "user.email=mimin@example.invalid",
+      "commit", "--quiet", "-m", "initial",
+    ]);
+    await Bun.write(join(workspace, "untouched.ts"), "export const value = 1;\n");
+    let launches = 0;
+    const tracker = new DelegationTracker({ workspaceState: gitWorkspaceState(workspace) });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        return result("partial", `session-${context.index}`, "nothing changed");
+      },
+    });
+
+    const first = await execute(delegate, { task: "Fix auth tests" }, undefined, 1);
+    const second = await execute(delegate, { task: "Fix auth tests" }, undefined, 2);
+    const third = await execute(delegate, { task: "Fix auth tests" }, undefined, 3);
+    const blocked = await execute(delegate, { task: "Fix auth tests" }, undefined, 4);
+    expect(launches).toBe(3);
+    expect(JSON.stringify(first)).toContain("(1/3)");
+    expect(JSON.stringify(second)).toContain("(2/3)");
+    expect(JSON.stringify(third)).toContain("(3/3)");
+    expect(JSON.stringify(blocked)).toContain("already been attempted 3 times");
+  });
 });
 
 describe("stable verification failure tracking", () => {

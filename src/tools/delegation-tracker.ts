@@ -66,42 +66,6 @@ function fingerprintBytes(bytes: Uint8Array): string {
   return `${bytes.byteLength}:${(hashBytes(bytes) >>> 0).toString(16)}`;
 }
 
-async function commandOutput(
-  workspace: string,
-  command: string[],
-  maxBytes: number,
-): Promise<Uint8Array | undefined> {
-  try {
-    const process = Bun.spawn(command, { cwd: workspace, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
-    const reader = process.stdout.getReader();
-    const chunks: Uint8Array[] = [];
-    let retained = 0;
-    try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) break;
-        const selected = chunk.value.subarray(0, Math.max(0, maxBytes - retained));
-        if (selected.byteLength > 0) {
-          chunks.push(selected);
-          retained += selected.byteLength;
-        }
-      }
-    } finally {
-      reader.releaseLock();
-    }
-    if (await process.exited !== 0) return undefined;
-    const output = new Uint8Array(retained);
-    let offset = 0;
-    for (const chunk of chunks) {
-      output.set(chunk, offset);
-      offset += chunk.byteLength;
-    }
-    return output;
-  } catch {
-    return undefined;
-  }
-}
-
 async function commandFingerprint(workspace: string, command: string[]): Promise<string | undefined> {
   try {
     const process = Bun.spawn(command, { cwd: workspace, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
@@ -124,21 +88,65 @@ async function commandFingerprint(workspace: string, command: string[]): Promise
   }
 }
 
-async function untrackedContentsFingerprint(workspace: string): Promise<string | undefined> {
+/**
+ * One bounded `git ls-files --others --exclude-standard -z` pass. The retained
+ * byte window covers the path entries this pass actually fingerprints (which
+ * would otherwise be a TOCTOU against a second spawn), while the full-stream
+ * fingerprint keeps later list changes detectable without retaining the list.
+ */
+interface UntrackedList {
+  paths: string[];
+  listFingerprint: string | undefined;
+}
+
+async function untrackedList(workspace: string): Promise<UntrackedList | undefined> {
   const command = ["git", "ls-files", "--others", "--exclude-standard", "-z"];
-  const [listFingerprint, listed] = await Promise.all([
-    commandFingerprint(workspace, command),
-    commandOutput(workspace, command, MAX_UNTRACKED_LIST_BYTES),
-  ]);
-  if (listFingerprint === undefined || listed === undefined) return undefined;
+  try {
+    const process = Bun.spawn(command, { cwd: workspace, stdin: "ignore", stdout: "pipe", stderr: "ignore" });
+    const reader = process.stdout.getReader();
+    const chunks: Uint8Array[] = [];
+    let retained = 0;
+    let hash = 2_166_136_261;
+    let size = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        hash = hashBytes(chunk.value, hash);
+        size += chunk.value.byteLength;
+        const selected = chunk.value.subarray(0, Math.max(0, MAX_UNTRACKED_LIST_BYTES - retained));
+        if (selected.byteLength > 0) {
+          chunks.push(selected);
+          retained += selected.byteLength;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    if (await process.exited !== 0) return undefined;
+    const listFingerprint = `${size}:${(hash >>> 0).toString(16)}`;
+    const output = new Uint8Array(retained);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    const decoded = new TextDecoder().decode(output);
+    const entries = decoded.split("\0");
+    if (!decoded.endsWith("\0")) entries.pop();
+    return { paths: entries.filter(Boolean), listFingerprint };
+  } catch {
+    return undefined;
+  }
+}
+
+async function untrackedContentsFingerprint(workspace: string): Promise<string | undefined> {
+  const listed = await untrackedList(workspace);
+  if (listed === undefined) return undefined;
   // Preserve a fingerprint of Git's complete list, even when content reading is bounded.
-  const decoded = new TextDecoder().decode(listed);
-  const entries = decoded.split("\0");
-  if (!decoded.endsWith("\0")) entries.pop();
-  const paths = entries.filter(Boolean);
-  const records: string[] = [`list:${listFingerprint}`, `listed:${paths.length}`];
+  const records: string[] = [`list:${listed.listFingerprint}`, `listed:${listed.paths.length}`];
   let totalRead = 0;
-  for (const relative of paths.slice(0, MAX_UNTRACKED_FILES)) {
+  for (const relative of listed.paths.slice(0, MAX_UNTRACKED_FILES)) {
     const pathBytes = new TextEncoder().encode(relative);
     try {
       const absolute = join(workspace, relative);
@@ -172,7 +180,7 @@ async function untrackedContentsFingerprint(workspace: string): Promise<string |
       records.push(`path:${fingerprintBytes(pathBytes)}:unreadable`);
     }
   }
-  if (paths.length > MAX_UNTRACKED_FILES) records.push(`files-bounded:${paths.length - MAX_UNTRACKED_FILES}`);
+  if (listed.paths.length > MAX_UNTRACKED_FILES) records.push(`files-bounded:${listed.paths.length - MAX_UNTRACKED_FILES}`);
   return fingerprintBytes(new TextEncoder().encode(records.join("\n")));
 }
 
