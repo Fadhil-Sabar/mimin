@@ -8,7 +8,13 @@ import {
   Footer,
   Header,
   SidekickActivity,
+  ToolActivity,
   Transcript,
+  AnimationTicker,
+  SPINNER_FRAMES,
+  spinnerFrame,
+  cursorVisible,
+  pulsePhase,
   type TuiHost,
 } from "../src/tui/index.js";
 
@@ -399,7 +405,7 @@ describe("lightweight pi-tui areas", () => {
     const rows = textOf(app.transcript.render(80));
     // Lowercase aligned labels, path from tool_start args, no debug text.
     expect(rows).toContain("✓ read   src/app.ts");
-    expect(rows).toContain("✕ edit");
+    expect(rows).toContain("× edit");
     expect(rows).toContain("oldText was not found");
     expect(rows).not.toContain("(turn");
     expect(rows).not.toContain("[ok]");
@@ -432,9 +438,9 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("● bash   bun test");
-    expect(rows).toContain("● edit   src/cli.ts");
-    expect(rows).toContain("…");
+    expect(rows).toContain("⠋ bash   bun test");
+    expect(rows).toContain("⠋ edit   src/cli.ts");
+    expect(rows).toContain("⠋");
   });
 
   test("delegate is represented by the sidekick card, not a tool row", () => {
@@ -476,7 +482,7 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
     });
-    expect(textOf(app.transcript.render(80))).toContain("● read   a.ts");
+    expect(textOf(app.transcript.render(80))).toContain("⠋ read   a.ts");
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
@@ -487,13 +493,13 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "edit", arguments: { path: "b.ts" } } },
     });
-    expect(textOf(app.transcript.render(80))).toContain("● edit   b.ts");
+    expect(textOf(app.transcript.render(80))).toContain("⠋ edit   b.ts");
     app.handleManagerEvent({
       type: "model_event",
       event: { type: "tool_end", turn: 1, toolCall: { name: "edit" }, result: { isError: true, text: "boom" } },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("✕ edit   b.ts");
+    expect(rows).toContain("× edit   b.ts");
     expect(rows).toContain("boom");
   });
 
@@ -518,7 +524,7 @@ describe("lightweight pi-tui areas", () => {
     });
     const rows = textOf(app.transcript.render(80));
     // The name is already in the label column; the prefix is stripped.
-    expect(rows).toContain("✕ read   src");
+    expect(rows).toContain("× read   src");
     expect(rows).not.toContain('Tool "read" failed:');
     expect(rows).toContain('Path "src" is not a regular file');
   });
@@ -546,7 +552,7 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("✕ bash");
+    expect(rows).toContain("× bash");
     expect(rows).toContain("ENOENT: no such file");
     expect(rows).not.toContain("\u001b[31m");
     // The error sub-line is compact: "· " marker plus a 60-char error cap.
@@ -574,7 +580,7 @@ describe("lightweight pi-tui areas", () => {
     // Exactly one row, now completed; no second "running" copy survives.
     expect(rows.match(/read/g)).toHaveLength(1);
     expect(rows).toContain("✓ read   a.ts");
-    expect(rows).not.toContain("● read");
+    expect(rows).not.toContain("⠋ read");
   });
 
   test("tool rows group per turn, inline in conversation order", () => {
@@ -668,7 +674,7 @@ describe("lightweight pi-tui areas", () => {
       type: "model_event",
       event: { type: "tool_start", turn: 1, toolCall: { name: "verification", arguments: { action: "test" } } },
     });
-    expect(textOf(app.transcript.render(80))).toContain("● verify");
+    expect(textOf(app.transcript.render(80))).toContain("⠋ verify");
     app.handleManagerEvent({
       type: "model_event",
       event: {
@@ -985,7 +991,7 @@ describe("lightweight pi-tui areas", () => {
       activity: { type: "tool_started", sessionId: "s-1", tool: "read", detail: "src/a.ts", timestamp: 0 },
     });
     const running = textOf(cards.render(100));
-    expect(running).toContain("● running");
+    expect(running).toContain("⠋ running");
     expect(running).toContain("read src/a.ts");
     cards.apply({
       type: "delegation_finished",
@@ -1526,7 +1532,7 @@ describe("lightweight pi-tui areas", () => {
     });
     view = textOf(app.render(100));
     expect(view.match(/sidekick #1/g)).toHaveLength(1);
-    expect(view).toContain("● running");
+    expect(view).toContain("⠋ running");
     expect(view).toContain("read src/a.ts");
     expect(textOf(app.footer.render(80))).toContain("1/1 sidekicks running");
 
@@ -1644,7 +1650,7 @@ describe("lightweight pi-tui areas", () => {
       },
     });
     const rows = textOf(app.transcript.render(80));
-    expect(rows).toContain("✕ bash   bun test · exit 2");
+    expect(rows).toContain("× bash   bun test · exit 2");
     expect(rows).toContain("boom");
     expect(rows).not.toContain("exitCode:");
     expect(rows).not.toContain("stderr:");
@@ -1710,5 +1716,288 @@ describe("lightweight pi-tui areas", () => {
     expect(runningLine).toContain("esc cancel");
     expect(runningLine).toContain("ctrl+c quit");
     expect(runningLine).not.toContain("/help");
+  });
+
+  test("spinner helper yields deterministic frames across the frame set", () => {
+    // The canonical frame set is exported; the helper wraps modulo 10.
+    expect(SPINNER_FRAMES).toHaveLength(10);
+    expect(spinnerFrame(0)).toBe("⠋");
+    expect(spinnerFrame(1)).toBe("⠙");
+    expect(spinnerFrame(9)).toBe("⠏");
+    expect(spinnerFrame(10)).toBe("⠋"); // wraps
+    // Negative frames wrap too (defensive).
+    expect(spinnerFrame(-1)).toBe("⠏");
+    // Cursor blinks on a 5-frame cadence: visible 500ms, hidden 500ms.
+    expect(cursorVisible(0)).toBe(true);
+    expect(cursorVisible(4)).toBe(true);
+    expect(cursorVisible(5)).toBe(false);
+    expect(cursorVisible(9)).toBe(false);
+    expect(cursorVisible(10)).toBe(true);
+    // Queued pulse alternates every six frames (600ms at the shared tick rate).
+    expect(pulsePhase(0)).toBe(0);
+    expect(pulsePhase(5)).toBe(0);
+    expect(pulsePhase(6)).toBe(1);
+    expect(pulsePhase(11)).toBe(1);
+    expect(pulsePhase(12)).toBe(0);
+  });
+
+  test("running tool rows animate the spinner glyph across frames", () => {
+    const first = new ToolActivity({ frame: 0, now: 0 });
+    first.apply({ type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } });
+    expect(textOf(first.render(80))).toContain("⠋ read   a.ts");
+    // A different phase renders a different frame: the glyph is live, not static.
+    const second = new ToolActivity({ frame: 3, now: 0 });
+    second.apply({ type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } });
+    expect(textOf(second.render(80))).toContain("⠸ read   a.ts");
+    expect(textOf(second.render(80))).not.toContain("⠋");
+    // Completed rows keep the static ok glyph; the spinner never leaks.
+    second.apply({ type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } });
+    const done = textOf(second.render(80));
+    expect(done).toContain("✓ read   a.ts");
+    expect(done).not.toMatch(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/);
+  });
+
+  test("running sidekick cards animate the spinner; queued cards pulse", () => {
+    // Running: the status chip spins with the frame.
+    const run0 = new SidekickActivity("/repo", () => 0, { frame: 0, now: 0 });
+    run0.apply({ type: "delegation_started", index: 0, taskCount: 1, task: "t", model: "m" });
+    run0.apply({
+      type: "sidekick_activity",
+      index: 0,
+      taskCount: 1,
+      activity: { type: "sidekick_started", sessionId: "s-1", timestamp: 0 },
+    });
+    expect(textOf(run0.render(100))).toContain("⠋ running");
+    const run1 = new SidekickActivity("/repo", () => 0, { frame: 4, now: 0 });
+    run1.apply({ type: "delegation_started", index: 0, taskCount: 1, task: "t", model: "m" });
+    run1.apply({
+      type: "sidekick_activity",
+      index: 0,
+      taskCount: 1,
+      activity: { type: "sidekick_started", sessionId: "s-1", timestamp: 0 },
+    });
+    expect(textOf(run1.render(100))).toContain("⠼ running");
+    // Queued: the slower pulse switches between two static waiting glyphs.
+    const q0 = new SidekickActivity("/repo", () => 0, { frame: 0, now: 0 });
+    q0.apply({ type: "delegation_started", index: 0, taskCount: 1, task: "t", model: "m" });
+    expect(textOf(q0.render(100))).toContain("○ queued");
+    const q6 = new SidekickActivity("/repo", () => 0, { frame: 6, now: 0 });
+    q6.apply({ type: "delegation_started", index: 0, taskCount: 1, task: "t", model: "m" });
+    expect(textOf(q6.render(100))).toContain("◌ queued");
+    // At a narrow width, status survives before sidekick/task detail.
+    expect(textOf(run0.render(14))).toContain("⠋ running");
+    expectWidth(run0.render(14), 14);
+  });
+
+  test("footer shows spinner + elapsed while working and flips to cancelling", () => {
+    const footer = new Footer({
+      managerModel: "gpt-5.5",
+      managerWorking: true,
+      animation: { frame: 0, now: 0 },
+      now: () => 0,
+    });
+    let line = textOf(footer.render(80));
+    expect(line).toContain("⠋ working");
+    expect(line).toContain("0s");
+    // Elapsed advances with the animation clock, not a wall-clock timer.
+    footer.setStatus({ cancelling: true });
+    line = textOf(footer.render(80));
+    expect(line).toContain("⠋ cancelling");
+    expect(line).not.toContain("working");
+    // A later frame spins the glyph forward.
+    const footer2 = new Footer({
+      managerModel: "gpt-5.5",
+      managerWorking: true,
+      animation: { frame: 5, now: 0 },
+      now: () => 0,
+    });
+    expect(textOf(footer2.render(80))).toContain("⠴ working");
+    // invalidate() rebuilds the status from the live frame: advancing the
+    // shared animation state must advance the spinner on the next render.
+    const state = { frame: 0, now: 0 };
+    const live = new Footer({
+      managerModel: "gpt-5.5",
+      managerWorking: true,
+      animation: state,
+      now: () => 0,
+    });
+    expect(textOf(live.render(80))).toContain("⠋ working");
+    state.frame = 3;
+    live.invalidate();
+    expect(textOf(live.render(80))).toContain("⠸ working");
+    state.frame = 4;
+    live.invalidate();
+    expect(textOf(live.render(80))).toContain("⠼ working");
+    // Idle clears the run chrome entirely.
+    footer.setStatus({ managerWorking: false });
+    expect(textOf(footer.render(80))).toContain("/help");
+    expect(textOf(footer.render(80))).not.toContain("working");
+    expect(textOf(footer.render(80))).not.toContain("cancelling");
+  });
+
+  test("transient manager cursor renders while streaming and never persists", () => {
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: new FakeTui(),
+    });
+    const streamId = app.startManagerStream("hello");
+    app.appendManagerDelta(" world");
+    // The cursor is appended to the rendered last line at frame 0 (visible).
+    const rendered = textOf(app.transcript.render(80));
+    expect(rendered).toContain("hello world▌");
+    // The cursor is transient: the entry's text is untouched.
+    const entry = app.transcript.entries.find((item) => item.id === streamId);
+    expect(entry?.text).toBe("hello world");
+    // Finishing the stream drops the cursor from the rendered output.
+    app.finishManagerStream("hello world", streamId);
+    const done = textOf(app.transcript.render(80));
+    expect(done).toContain("hello world");
+    expect(done).not.toContain("▌");
+
+    // Restored messages are historical, never live streams, so they cannot
+    // acquire a cursor even if a prior stream had been active.
+    app.restoreSession([{ role: "manager", text: "restored" }]);
+    expect(textOf(app.transcript.render(80))).toContain("restored");
+    expect(textOf(app.transcript.render(80))).not.toContain("▌");
+  });
+
+  test("Escape shows cancelling until the manager run stops", () => {
+    let cancelled = 0;
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: new FakeTui(),
+      onCancel: () => { cancelled += 1; },
+    });
+    app.setRunning(true);
+    app.footer.handleInput("\u001b");
+    expect(cancelled).toBe(1);
+    expect(textOf(app.footer.render(80))).toContain("cancelling");
+    app.setRunning(false);
+    expect(textOf(app.footer.render(80))).not.toContain("cancelling");
+  });
+
+  test("app ticker runs on demand: starts with activity, stops when idle", () => {
+    const host = new FakeTui();
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: host,
+    });
+    app.start();
+    // Idle: no timer running.
+    expect(app.animation.running).toBe(false);
+    // A manager run starts the ticker immediately.
+    app.handleManagerEvent({ type: "model_event", event: { type: "text_start" } });
+    expect(app.animation.running).toBe(true);
+    // Tool activity keeps it running.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
+    });
+    expect(app.animation.running).toBe(true);
+    // Run ends: ticker stops on the next tick. Tools finish before `done`.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
+    });
+    app.handleManagerEvent({ type: "model_event", event: { type: "done" } });
+    app.animation.tick();
+    expect(app.animation.running).toBe(false);
+    app.stop();
+  });
+
+  test("delegate events start and stop the app ticker with sidekick activity", () => {
+    const host = new FakeTui();
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: host,
+    });
+    app.start();
+    expect(app.animation.running).toBe(false);
+    // A queued sidekick starts the ticker (queued cards pulse).
+    app.delegateStarted(0, 1);
+    expect(app.animation.running).toBe(true);
+    // Running activity keeps it on.
+    app.delegateActivity(0, { type: "sidekick_started", sessionId: "s-1", timestamp: 0 }, 1);
+    expect(app.animation.running).toBe(true);
+    // Completion stops it once no card is queued/running.
+    app.delegateFinished(0, { status: "complete", summary: "done", sessionId: "s-1" }, 1);
+    app.animation.tick();
+    expect(app.animation.running).toBe(false);
+    app.stop();
+  });
+
+  test("animation ticks preserve manual scroll and remain valid after resize", () => {
+    const host = new FakeTui();
+    host.terminal = { rows: 12 };
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: host,
+    });
+    for (let index = 0; index < 30; index += 1) app.addInfo(`entry ${index}`);
+    app.start();
+    app.setRunning(true);
+    app.render(60);
+    app.transcript.scrollUp(12);
+    const scrolled = app.render(60);
+    app.animation.tick();
+    const afterTick = app.render(60);
+    expect(app.transcript.isTailAnchored()).toBe(false);
+    expect(textOf(afterTick)).not.toContain("entry 29");
+    expect(afterTick[2]).toBe(scrolled[2]);
+
+    // Resizing while the shared clock is active re-bounds the live viewport
+    // without invalid rows or a forced jump away from the tail once selected.
+    app.transcript.scrollToBottom();
+    host.terminal.rows = 24;
+    app.animation.tick();
+    const resized = app.render(40);
+    expect(app.transcript.isTailAnchored()).toBe(true);
+    expect(textOf(resized)).toContain("entry 29");
+    expectWidth(resized, 40);
+    app.stop();
+  });
+
+  test("ticker lifecycle: idle start off, setRunning starts, tools/cards keep it alive after the manager stops", () => {
+    const host = new FakeTui();
+    const app = createApp({
+      managerModel: "gpt-5.5",
+      workspace: "/repo",
+      tui: host,
+    });
+    // 1. Idle start: no timer.
+    app.start();
+    expect(app.animation.running).toBe(false);
+
+    // 2. setRunning(true) — the CLI's submit path — starts the ticker.
+    app.setRunning(true);
+    expect(app.animation.running).toBe(true);
+
+    // 3. A running tool and a running sidekick keep the ticker alive even
+    //    after the manager run itself finishes (done).
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_start", turn: 1, toolCall: { name: "read", arguments: { path: "a.ts" } } },
+    });
+    app.delegateStarted(0, 1);
+    app.delegateActivity(0, { type: "sidekick_started", sessionId: "s-1", timestamp: 0 }, 1);
+    app.handleManagerEvent({ type: "model_event", event: { type: "done" } });
+    app.animation.tick();
+    // The manager run ended, but the tool row and sidekick card still animate.
+    expect(app.animation.running).toBe(true);
+
+    // 4. Finish the tool and the card: everything is idle, ticker stops.
+    app.handleManagerEvent({
+      type: "model_event",
+      event: { type: "tool_end", turn: 1, toolCall: { name: "read" }, result: { isError: false } },
+    });
+    app.delegateFinished(0, { status: "complete", summary: "done", sessionId: "s-1" }, 1);
+    app.animation.tick();
+    expect(app.animation.running).toBe(false);
+    app.stop();
   });
 });

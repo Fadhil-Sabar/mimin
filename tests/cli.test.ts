@@ -413,6 +413,7 @@ describe("interactive integration", () => {
   test("Escape cancels an active manager run via the abort signal", async () => {
     const { workspace, config } = await fixture();
     let aborted = false;
+    let fakeTui: FakeTui | undefined;
     const code = await runCli([], {
       cwd: workspace,
       io: captureIo(),
@@ -433,13 +434,14 @@ describe("interactive integration", () => {
         return completed(options.sessionId ?? "missing", "never");
       },
       createTui: (options) => {
-        return new FakeTui(options, async (callbacks) => {
+        fakeTui = new FakeTui(options, async (callbacks) => {
           // Fire onSubmit (don't await — it hangs) then Escape cancels.
           void callbacks.onSubmit?.("slow task");
           await Bun.sleep(10);
           await callbacks.onCancel?.();
           await callbacks.onExit?.();
         });
+        return fakeTui;
       },
     });
 

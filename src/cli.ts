@@ -642,7 +642,6 @@ async function runInteractive(
     onCancel: () => {
       if (activeController) {
         activeController.abort();
-        app?.addInfo("Cancelling the active manager run…");
         return;
       }
       // Idle: Escape clears the draft input.
@@ -770,7 +769,9 @@ async function runInteractive(
         sessionId = result.sessionId;
         app?.setStatus({ sessionId });
         completed = result.status === "completed";
-        if (!completed) {
+        if (result.status === "aborted") {
+          app?.addInfo("× cancelled");
+        } else if (!completed) {
           app?.addError(
             `Manager stopped with status ${result.status}${result.error ? `: ${terminalText(result.error, 2_000)}` : ""}.`,
           );
@@ -778,7 +779,8 @@ async function runInteractive(
           app?.addManager(terminalText(result.finalText, 256 * 1024));
         }
       } catch (error) {
-        app?.addError(`Manager error: ${terminalText(error instanceof Error ? error.message : error, 2_000)}`);
+        if (controller.signal.aborted) app?.addInfo("× cancelled");
+        else app?.addError(`Manager error: ${terminalText(error instanceof Error ? error.message : error, 2_000)}`);
       } finally {
         if (activeController === controller) activeController = undefined;
         running = false;

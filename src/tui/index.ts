@@ -15,6 +15,15 @@ export { sessionSuggestionsFromStore, sessionToSuggestion } from "./session-sugg
 export type { SessionSuggestion } from "./session-suggestions.js";
 
 export { dim, green, yellow, cyan } from "./theme.js";
+export {
+  AnimationTicker,
+  ANIMATION_INTERVAL_MS,
+  SPINNER_FRAMES,
+  spinnerFrame,
+  cursorVisible,
+  pulsePhase,
+} from "./animation.js";
+export type { AnimationState } from "./animation.js";
 
 export { Footer } from "./footer.js";
 export type {

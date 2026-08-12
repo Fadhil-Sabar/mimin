@@ -18,6 +18,7 @@ import type { ProviderSuggestionSource } from "./commands.js";
 import { suggestModels } from "./model-suggestions.js";
 import type { ModelSuggestionSource } from "./model-suggestions.js";
 import { cyan, dim, green, yellow } from "./theme.js";
+import { spinnerFrame, type AnimationState } from "./animation.js";
 
 export interface ContextUsage {
   used: number;
@@ -53,10 +54,9 @@ export interface FooterOptions {
   onSubmitKey?: (provider: string, key: string) => void | Promise<void>;
   onCancelKey?: () => void;
   requestRender?: () => void;
+  animation?: AnimationState;
+  now?: () => number;
 }
-
-/** How often the running status refreshes its elapsed-seconds readout. */
-const STATUS_TICK_MS = 1000;
 
 function contextText(context: ContextSummary | undefined): string {
   if (typeof context === "string") return sanitizeText(context, false) || "--";
@@ -209,7 +209,9 @@ export class Footer implements Component, Focusable {
   private managerWorking = false;
   /** Wall-clock time the current manager run started (for elapsed seconds). */
   private workingStartedAt?: number;
-  private timer?: Timer;
+  private cancelling = false;
+  private readonly animation?: AnimationState;
+  private readonly nowFn: () => number;
   private handleEscape: (data: string) => void;
   private readonly optionsRequestRender?: () => void;
   private readonly optionsOnSubmitKey?: (provider: string, key: string) => void | Promise<void>;
@@ -220,6 +222,8 @@ export class Footer implements Component, Focusable {
 
   constructor(options: FooterOptions) {
     this.optionsRequestRender = options.requestRender;
+    this.animation = options.animation;
+    this.nowFn = options.now ?? Date.now;
     this.optionsOnSubmitKey = options.onSubmitKey;
     this.optionsOnCancelKey = options.onCancelKey;
     this.optionsOnSubmitError = options.onSubmitError;
@@ -229,7 +233,7 @@ export class Footer implements Component, Focusable {
     this.sidekickWorking = Math.max(0, Math.floor(options.sidekickWorking ?? 0));
     this.sidekickTotal = Math.max(0, Math.floor(options.sidekickTotal ?? 0));
     this.managerWorking = options.managerWorking === true;
-    this.workingStartedAt = this.managerWorking ? Date.now() : undefined;
+    this.workingStartedAt = this.managerWorking ? this.nowFn() : undefined;
 
     // The editor must be constructed with a real TUI for terminal sizing; the
     // test seam supplies its host instead, which exposes the same surface.
@@ -279,7 +283,6 @@ export class Footer implements Component, Focusable {
       this.editor.handleInput(data);
     };
 
-    this.updateTimer();
     this.refresh();
   }
 
@@ -303,6 +306,7 @@ export class Footer implements Component, Focusable {
     sidekickWorking?: number;
     sidekickTotal?: number;
     managerWorking?: boolean;
+    cancelling?: boolean;
   }): void {
     if (update.managerModel !== undefined) {
       this.model = sanitizeText(update.managerModel, false) || "unknown";
@@ -321,10 +325,11 @@ export class Footer implements Component, Focusable {
       const next = update.managerWorking === true;
       if (this.managerWorking !== next) {
         this.managerWorking = next;
-        this.workingStartedAt = next ? Date.now() : undefined;
-        this.updateTimer();
+        this.workingStartedAt = next ? this.nowFn() : undefined;
+        if (!next) this.cancelling = false;
       }
     }
+    if (update.cancelling !== undefined) this.cancelling = update.cancelling && this.managerWorking;
     this.refresh();
   }
 
@@ -422,12 +427,17 @@ export class Footer implements Component, Focusable {
   }
 
   invalidate(): void {
+    // Rebuild the status text from the live animation frame/clock before the
+    // TUI re-renders, so the spinner and elapsed seconds actually advance on
+    // each tick (TruncatedText alone would re-render stale content).
+    this.refresh();
     this.status.invalidate();
     this.editor.invalidate();
   }
 
   /** Status plus the multi-line editor, separated by a dim rule. */
   render(width: number): string[] {
+    this.refresh();
     if (width <= 0) return ["", ""];
     const rule = width > 0 ? dim("─".repeat(Math.max(1, width))) : "";
     if (this.keyPrompt) {
@@ -461,19 +471,6 @@ export class Footer implements Component, Focusable {
     ];
   }
 
-  private updateTimer(): void {
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-    }
-    if (this.managerWorking) {
-      this.timer = setInterval(() => {
-        this.refresh();
-        this.optionsRequestRender?.();
-      }, STATUS_TICK_MS);
-    }
-  }
-
   /** Sidekick status segment shared by the running and idle status lines. */
   private sidekickText(): string {
     if (this.sidekickTotal > 0) {
@@ -498,10 +495,12 @@ export class Footer implements Component, Focusable {
   private refresh(): void {
     if (this.managerWorking) {
       const elapsed = this.workingStartedAt !== undefined
-        ? Math.max(0, Math.floor((Date.now() - this.workingStartedAt) / 1000))
+        ? Math.max(0, Math.floor(((this.animation?.now ?? this.nowFn()) - this.workingStartedAt) / 1000))
         : 0;
+      const label = this.cancelling ? "cancelling" : "working";
+      const spinner = cyan(spinnerFrame(this.animation?.frame ?? 0));
       this.status = new TruncatedText(
-        `${dim("esc cancel")} · ${dim("ctrl+c quit")}${this.sidekickText()} · ${cyan(`${elapsed}s`)}`,
+        `${dim("esc cancel")} · ${dim("ctrl+c quit")} · ${spinner} ${label}${this.sidekickText()} · ${cyan(`${elapsed}s`)}`,
       );
       return;
     }

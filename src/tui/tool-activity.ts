@@ -1,6 +1,7 @@
 import { truncateToWidth, type Component } from "@mariozechner/pi-tui";
 import { sanitizeText } from "./header.js";
 import { cyan, dim, green, yellow } from "./theme.js";
+import { spinnerFrame, type AnimationState } from "./animation.js";
 
 /** Local structural event accepted without importing agent or pi-ai types. */
 export interface LocalToolEvent {
@@ -196,6 +197,7 @@ function compact(value: unknown, limit: number): string {
  */
 export class ToolActivity implements Component {
   private readonly rows: ToolRow[] = [];
+  constructor(private readonly animation?: AnimationState) {}
   /** Turn of the most recent tool_start, for grouping rows into blocks. */
   private currentTurn = 0;
 
@@ -272,6 +274,10 @@ export class ToolActivity implements Component {
     return lines;
   }
 
+  hasRunning(): boolean {
+    return this.rows.some((row) => row.status === "running");
+  }
+
   clear(): void {
     this.rows.length = 0;
     this.currentTurn = 0;
@@ -290,13 +296,15 @@ export class ToolActivity implements Component {
   private renderRow(row: ToolRow, width: number): string[] {
     const label = labelOf(row.name).padEnd(LABEL_WIDTH);
     const glyph = STATUS_GLYPHS[row.status];
-    const styledGlyph = row.status === "failed"
-      ? yellow(glyph)
-      : row.status === "ok"
-        ? green(glyph)
-        : cyan(glyph);
+    const styledGlyph = row.status === "running"
+      ? cyan(spinnerFrame(this.animation?.frame ?? 0))
+      : row.status === "failed"
+        ? yellow(glyph)
+        : row.status === "ok"
+          ? green(glyph)
+          : cyan(glyph);
     const detail = row.detail ? ` ${dim(row.detail)}` : "";
-    const suffix = row.status === "running" ? ` ${cyan("…")}` : "";
+    const suffix = "";
     const exit = row.status === "failed" && row.exitCode !== undefined
       ? ` ${yellow(`· exit ${row.exitCode}`)}`
       : "";
@@ -322,5 +330,5 @@ const STATUS_GLYPHS: Record<ToolStatus, string> = {
   pending: "○",
   running: "●",
   ok: "✓",
-  failed: "✕",
+  failed: "×",
 };

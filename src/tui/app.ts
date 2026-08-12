@@ -18,6 +18,7 @@ import {
 } from "./sidekick.js";
 import { ToolActivity, type LocalToolEvent } from "./tool-activity.js";
 import { Transcript, type TranscriptRole } from "./transcript.js";
+import { AnimationTicker } from "./animation.js";
 
 export interface TuiHost {
   addChild(component: Component): void;
@@ -69,8 +70,6 @@ export interface AgentTuiOptions {
   tui?: TuiHost;
 }
 
-/** Heartbeat interval for live elapsed tickers while a run is active. */
-const TICK_INTERVAL_MS = 1_000;
 /** One page of transcript rows scrolled per PageUp/PageDown press. */
 const SCROLL_PAGE = 12;
 /** Number of transcript rows moved by one mouse-wheel tick. */
@@ -126,7 +125,7 @@ export class AgentTui {
   private started = false;
   private mouseTrackingEnabled = false;
   private readonly writeTerminal?: (data: string) => void;
-  private tickTimer?: Timer;
+  readonly animation = new AnimationTicker({ onTick: () => this.onAnimationTick() });
   private lastTranscriptMaxLines = 0;
   private exitArmed = false;
   private exitArmedAt = 0;
@@ -148,12 +147,12 @@ export class AgentTui {
       workspace: options.workspace,
       thinking: options.thinking,
     });
-    this.transcript = new Transcript();
+    this.transcript = new Transcript(1_000, this.animation.state);
     // Re-bind the transcript to the viewport before every render (the TUI
     // renders the transcript child directly, so this is the reliable hook).
     this.transcript.onBeforeRender = (width) => this.syncTranscriptHeight(width);
-    this.sidekicks = new SidekickActivity(options.workspace);
-    this.tools = new ToolActivity();
+    this.sidekicks = new SidekickActivity(options.workspace, undefined, this.animation.state);
+    this.tools = new ToolActivity(this.animation.state);
     this.footer = new Footer({
       managerModel: options.managerModel,
       thinking: options.thinking,
@@ -167,13 +166,19 @@ export class AgentTui {
         this.addUser(line);
         await options.onSubmit?.(line);
       },
-      onCancel: options.onCancel,
+      onCancel: () => {
+        // Surface the cancelling state before the owner's handler (abort).
+        this.setCancelling();
+        options.onCancel?.();
+        this.requestRender();
+      },
       onSubmitKey: options.onSubmitKey,
       onCancelKey: options.onCancelKey,
       onSubmitError: (error) => this.addError(
         error instanceof Error ? error.message : String(error),
       ),
       requestRender: () => this.requestRender(),
+      animation: this.animation.state,
     });
     // Key prompts render through the footer; expose a programmatic trigger.
     this.promptForKey = (provider) => {
@@ -235,25 +240,34 @@ export class AgentTui {
     if (this.started) return;
     this.started = true;
     this.enableMouseTracking();
-    this.tickTimer = setInterval(() => {
-      if (this.runState === "idle") return;
-      this.header.invalidate();
-      this.sidekicks.invalidate();
-      // Non-forced: the TUI diffs the invalidated components. A forced render
-      // would clear the screen and reset the viewport every second, yanking
-      // the user's scroll position while a response streams.
-      this.requestRender();
-    }, TICK_INTERVAL_MS);
+    this.syncAnimation();
     this.tui.start();
+  }
+
+  private onAnimationTick(): void {
+    if (!this.wantsAnimation()) {
+      this.animation.stop();
+      return;
+    }
+    this.footer.invalidate();
+    this.transcript.invalidate();
+    this.requestRender();
+  }
+
+  private wantsAnimation(): boolean {
+    return this.runState !== "idle" || this.activeManagerStream !== undefined
+      || this.tools.hasRunning() || this.sidekicks.hasActive();
+  }
+
+  private syncAnimation(): void {
+    if (this.started && this.wantsAnimation()) this.animation.start();
+    else this.animation.stop();
   }
 
   stop(): void {
     if (!this.started) return;
     this.started = false;
-    if (this.tickTimer) {
-      clearInterval(this.tickTimer);
-      this.tickTimer = undefined;
-    }
+    this.animation.stop();
     this.disableMouseTracking();
     this.tui.stop();
   }
@@ -331,11 +345,13 @@ export class AgentTui {
   /** Clear the transcript and replay a restored session's history. */
   restoreSession(entries: { role: "user" | "manager"; text: string }[]): void {
     this.transcript.clearEntries();
+    this.activeManagerStream = undefined;
     this.toolBlockByTurn.clear();
     this.tools.clear();
     this.sidekicks.clear();
     this.sidekickBlockByCard.clear();
     this.updateSidekickStatus();
+    this.syncAnimation();
     for (const entry of entries) {
       if (entry.role === "user") this.addUser(entry.text);
       else this.addManager(entry.text);
@@ -346,6 +362,7 @@ export class AgentTui {
   startManagerStream(initial = ""): string {
     if (this.activeManagerStream) this.transcript.finishStream(this.activeManagerStream);
     this.activeManagerStream = this.transcript.beginManagerStream(initial);
+    this.syncAnimation();
     this.requestRender();
     return this.activeManagerStream;
   }
@@ -370,7 +387,10 @@ export class AgentTui {
     if (!streamId) return false;
     const finished = this.transcript.finishStream(streamId, finalText);
     if (streamId === this.activeManagerStream) this.activeManagerStream = undefined;
-    if (finished) this.requestRender();
+    if (finished) {
+      this.syncAnimation();
+      this.requestRender();
+    }
     return finished;
   }
 
@@ -398,7 +418,6 @@ export class AgentTui {
       this.finishManagerStream();
       this.addError(managerError(event.error));
     } else if (type === "tool_start" || type === "tool_end") {
-      this.setRunState("working");
       const tracked = this.tools.apply(event as unknown as LocalToolEvent);
       // Tool rows live inline in the transcript, grouped per turn.
       const turn = record(event)?.turn;
@@ -409,6 +428,11 @@ export class AgentTui {
         );
         this.toolBlockByTurn.set(turnNumber, id);
       }
+      // A tool start keeps the manager visibly working. A late tool_end must
+      // not revive an already-finished run, while a normal tool_end preserves
+      // the working footer as the manager begins its next model turn.
+      if (this.tools.hasRunning()) this.setRunState("working");
+      this.syncAnimation();
       this.requestRender();
     }
   }
@@ -417,6 +441,7 @@ export class AgentTui {
     const cardId = this.sidekicks.apply(event);
     this.attachCard(cardId);
     this.updateSidekickStatus();
+    this.syncAnimation();
     this.requestRender();
   }
 
@@ -441,7 +466,8 @@ export class AgentTui {
   private setRunState(state: HeaderRunState): void {
     if (this.runState === state) return;
     this.runState = state;
-    this.footer.setStatus({ managerWorking: state !== "idle" });
+    this.footer.setStatus({ managerWorking: state !== "idle", cancelling: false });
+    this.syncAnimation();
   }
 
   /**
@@ -451,6 +477,14 @@ export class AgentTui {
    */
   setRunning(running: boolean): void {
     this.setRunState(running ? "working" : "idle");
+    this.requestRender();
+  }
+
+  /** Show the footer's "cancelling" state (Escape during a run). */
+  setCancelling(): void {
+    if (this.runState === "idle") return;
+    this.footer.setStatus({ cancelling: true });
+    this.syncAnimation();
     this.requestRender();
   }
 
@@ -464,6 +498,7 @@ export class AgentTui {
     const cardId = this.sidekicks.start(index, taskCount);
     this.attachCard(cardId);
     this.updateSidekickStatus();
+    this.syncAnimation();
     this.requestRender();
   }
 
@@ -475,6 +510,7 @@ export class AgentTui {
     const cardId = this.sidekicks.activity(index, taskCount, activity);
     this.attachCard(cardId);
     this.updateSidekickStatus();
+    this.syncAnimation();
     this.requestRender();
   }
 
@@ -486,6 +522,7 @@ export class AgentTui {
     const cardId = this.sidekicks.finish(index, taskCount, result);
     this.attachCard(cardId);
     this.updateSidekickStatus();
+    this.syncAnimation();
     this.requestRender();
   }
 

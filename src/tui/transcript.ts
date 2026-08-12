@@ -1,12 +1,14 @@
 import {
   Container,
   Markdown,
+  visibleWidth,
   Text,
   type Component,
   type MarkdownTheme,
 } from "@mariozechner/pi-tui";
 import { sanitizeText } from "./header.js";
 import { cyan, dim, green, yellow } from "./theme.js";
+import { cursorVisible, type AnimationState } from "./animation.js";
 
 export type TranscriptRole = "user" | "manager" | "info" | "error" | "tool";
 
@@ -110,13 +112,17 @@ export class Transcript extends Container implements Component {
   private tailAnchored = true;
   private maxLines = TRANSCRIPT_MAX_LINES;
   private maxEntries = TRANSCRIPT_MAX_ENTRIES;
-  /** Called before each render; lets the owner re-bound maxLines to the viewport. */
-  onBeforeRender: ((width: number) => void) | undefined;
-
-  constructor(maxLines = TRANSCRIPT_MAX_LINES) {
+  constructor(maxLines = TRANSCRIPT_MAX_LINES, private readonly animation?: AnimationState) {
     super();
     this.maxLines = Math.max(1, Math.floor(maxLines));
   }
+
+  isStreaming(): boolean {
+    return this.records.some((entry) => entry.streaming);
+  }
+  /** Called before each render; lets the owner re-bound maxLines to the viewport. */
+  onBeforeRender: ((width: number) => void) | undefined;
+
 
   /** Configure the maximum retained (and visible) transcript rows. */
   setMaxLines(maxLines: number): void {
@@ -351,6 +357,11 @@ export class Transcript extends Container implements Component {
     const body: string[] = [];
     for (const child of entry.component.children) {
       body.push(...child.render(width));
+    }
+    if (entry.streaming && body.length > 0 && cursorVisible(this.animation?.frame ?? 0)) {
+      const last = body.length - 1;
+      const content = (body[last] ?? "").replace(/\s+$/, "");
+      if (visibleWidth(content) < width) body[last] = `${content}▌`;
     }
     if (entry.trailingBlank && body.length > 0) body.push("");
     return body;

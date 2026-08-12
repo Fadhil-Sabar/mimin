@@ -4,6 +4,7 @@ import {
 } from "@mariozechner/pi-tui";
 import { sanitizeText } from "./header.js";
 import { cyan, dim, green, yellow } from "./theme.js";
+import { pulsePhase, spinnerFrame, type AnimationState } from "./animation.js";
 
 export type SidekickCardStatus =
   | "queued"
@@ -104,6 +105,7 @@ interface SidekickCard {
   expanded: boolean;
   activities: SafeToolActivity[];
   order: number;
+  animationFrame?: number;
 }
 
 /** Number of cards shown when every running card is collapsed. */
@@ -160,6 +162,7 @@ export class SidekickActivity implements Component {
   constructor(
     private readonly workspace = "",
     private readonly now: () => number = () => Date.now(),
+    private readonly animation?: AnimationState,
   ) {}
 
   invalidate(): void {
@@ -180,7 +183,11 @@ export class SidekickActivity implements Component {
   /** Render exactly one card by its stable id; undefined when unknown. */
   rendererFor(cardId: string): (width: number) => string[] {
     const card = this.byCardId.get(cardId);
-    return (width: number) => (card ? renderCard(card, width) : []);
+    return (width: number) => {
+      if (!card) return [];
+      card.animationFrame = this.animation?.frame ?? 0;
+      return renderCard(card, width);
+    };
   }
 
   start(index: number, taskCount = 1, task?: string, model?: string): string {
@@ -286,6 +293,10 @@ export class SidekickActivity implements Component {
     return card.expanded;
   }
 
+  hasActive(): boolean {
+    return this.cards.some((card) => card.status === "queued" || card.status === "running");
+  }
+
   /** Number of cards currently in the running state (for the footer). */
   workingCount(): number {
     return this.cards.reduce(
@@ -314,6 +325,7 @@ export class SidekickActivity implements Component {
   render(width: number): string[] {
     if (width <= 0) return this.cards.length > 0 ? [""] : [];
     const ordered = [...this.cards].sort((a, b) => a.order - b.order);
+    for (const card of ordered) card.animationFrame = this.animation?.frame ?? 0;
     const lines: string[] = [];
     let rendered = 0;
     for (const card of ordered) {
@@ -336,6 +348,7 @@ export class SidekickActivity implements Component {
       expanded: false,
       activities: [],
       order: ++this.order,
+      animationFrame: this.animation?.frame ?? 0,
     };
     if (task !== undefined) card.task = task;
     if (model !== undefined) card.model = model;
@@ -358,9 +371,15 @@ function metricsText(card: SidekickCard): string | undefined {
 }
 
 /** Colored status label; reused for both box header and docked summary. */
-function coloredStatus(card: SidekickCard): string {
-  if (card.status === "queued") return dim("○ queued");
-  if (card.status === "running") return cyan("● running");
+function animationFrame(card: SidekickCard): number {
+  return card.animationFrame ?? 0;
+}
+
+function coloredStatus(card: SidekickCard, frame: number): string {
+  // Queued cards pulse by alternating the glyph itself (◌ / ○); the resting
+  // phase is dimmed so the alternation reads clearly, not as a color-only.
+  if (card.status === "queued") return pulsePhase(frame) === 1 ? "◌ queued" : dim("○ queued");
+  if (card.status === "running") return cyan(`${spinnerFrame(frame)} running`);
   if (card.status === "complete") return green("✓ done");
   if (card.status === "partial") return dim("× partial");
   if (card.status === "needs_decision") return yellow("× decision");
@@ -391,14 +410,16 @@ function padTo(text: string, inner: number): string {
 function renderCard(card: SidekickCard, width: number): string[] {
   const inner = Math.max(1, width - 4);
   const label = `sidekick #${card.index + 1}`;
-  const status = coloredStatus(card);
+  const status = coloredStatus(card, animationFrame(card));
   const lines: string[] = [];
-  // Narrow mode: no box borders, one status row, then recent activity rows.
+  // Narrow mode: no box borders. Preserve the state before task/model detail.
   if (inner < 24) {
-    const headerLine = `${label} · ${compact(card.task, Math.max(1, inner - label.length - 2))}`;
+    const labelledStatus = `${label} · ${status}`;
+    const statusRows = visibleWidth(labelledStatus) <= width
+      ? [labelledStatus, compact(card.task, Math.max(1, inner))]
+      : [status, label, compact(card.task, Math.max(1, inner))];
     const body = [
-      headerLine,
-      status,
+      ...statusRows,
       ...(card.status !== "queued" && card.status !== "running" && card.summary
         ? [compact(card.summary, Math.max(1, inner))]
         : []),
