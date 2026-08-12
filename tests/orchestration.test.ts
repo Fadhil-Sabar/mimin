@@ -461,6 +461,50 @@ describe("manager correction and bounded delegation", () => {
     expect(JSON.stringify(output.messages)).toContain("already been attempted 3 times");
   });
 
+  test("uses the default fixed Git signal to allow iterative manager corrections that change the workspace", async () => {
+    const { workspace, dataDir } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    await git(workspace, ["add", ".keep"]);
+    await git(workspace, [
+      "-c", "user.name=mimin test",
+      "-c", "user.email=mimin@example.invalid",
+      "commit", "--quiet", "-m", "initial",
+    ]);
+    let launches = 0;
+    const responses = Array.from({ length: 4 }, (_, index) => assistant([
+      {
+        type: "toolCall",
+        id: `delegate-${index}`,
+        name: "delegate",
+        arguments: { task: "Fix auth tests" },
+      },
+    ], "toolUse"));
+    responses.push(assistant([{ type: "text", text: "Completed iterative correction." }]));
+    const stream = (_model: Model<Api>, _context: Context) => {
+      const response = responses.shift();
+      if (!response) throw new Error("unexpected manager turn");
+      return completedStream(response);
+    };
+
+    const output = await runManager({
+      input: "Fix the auth tests",
+      workspace,
+      config: config(dataDir),
+      model,
+      stream,
+      sidekickRunner: async (_task, context) => {
+        launches += 1;
+        await Bun.write(join(workspace, ".keep"), `correction ${launches}\n`);
+        return result("partial", `session-${context.index}`, "made another correction");
+      },
+    });
+
+    expect(output.status).toBe("completed");
+    expect(launches).toBe(4);
+    expect(JSON.stringify(output.messages)).not.toContain("Delegation blocked");
+    expect(JSON.stringify(output.messages)).not.toContain("No workspace progress detected");
+  });
+
   test("does not launch duplicate equivalent delegate calls from one manager response", async () => {
     const { workspace, dataDir } = await fixture();
     let launches = 0;
