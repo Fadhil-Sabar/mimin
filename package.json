@@ -1,6 +1,6 @@
 {
   "name": "mimin",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Minimal manager/sidekick coding agent for Bun",
   "private": true,
   "type": "module",
