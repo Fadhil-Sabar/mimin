@@ -1,4 +1,4 @@
-import type { AssistantMessage, Message, ToolCall } from "@mariozechner/pi-ai";
+import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "@mariozechner/pi-ai";
 import { redactSecrets } from "../memory/secrets.js";
 
 /** Input budget after output/tool headroom has been reserved. */
@@ -47,6 +47,17 @@ const MAX_FILES = 8;
 const MAX_VERIFICATIONS = 4;
 const MAX_SEARCH_MATCHES = 3;
 const HISTORICAL_TAIL = 8;
+
+const IMPORTANT_EVENT_CAPS = {
+  delegate: 3,
+  verification: 4,
+  edit: 6,
+  failure: 4,
+  other: 2,
+} as const;
+const MAX_OLDER_IMPORTANT_EVENTS = 4;
+const PROVIDER_DETAIL_STRING_LIMIT = 320;
+const PROVIDER_DETAIL_MATCH_LIMIT = 160;
 
 /** Lightweight, deterministic approximation used only for input budgeting. */
 export function estimateMessageTokens(message: Message): number {
@@ -180,7 +191,7 @@ function objectOf(value: unknown): Record<string, unknown> | undefined {
 
 function detailsOf(message: Message): Record<string, unknown> | undefined {
   if (message.role !== "toolResult") return undefined;
-  const direct = objectOf((message as Message & { details?: unknown }).details);
+  const direct = objectOf((message as ToolResultMessage).details);
   if (direct) return direct;
   try {
     return objectOf(JSON.parse(textOf(message)));
@@ -283,9 +294,80 @@ function toolSummary(messages: readonly Message[], resultIndex: number): string[
   return [`- Tool ${compactSnippet(name, 60)} ${message.isError ? "failed" : "completed"}.`];
 }
 
-function summaryEvents(messages: readonly Message[]): { goal: string[]; important: string[]; tail: string[] } {
+type ImportantEventKind = "delegate" | "verification" | "edit" | "failure" | "other";
+
+interface ImportantEvent {
+  kind: ImportantEventKind;
+  index: number;
+  lines: string[];
+  verificationFailed?: boolean;
+}
+
+interface SummaryEvents {
+  goal: string[];
+  important: ImportantEvent[];
+  tail: string[];
+}
+
+function recentEvents(events: readonly ImportantEvent[], limit: number): ImportantEvent[] {
+  return events.slice(-limit).reverse();
+}
+
+function pushUnique(events: ImportantEvent[], event: ImportantEvent | undefined): void {
+  if (event && !events.includes(event)) events.push(event);
+}
+
+function takeRecent(
+  selected: ImportantEvent[],
+  events: readonly ImportantEvent[],
+  category: ImportantEventKind,
+  limit: number,
+): void {
+  for (const event of recentEvents(events, limit)) {
+    if (selected.filter((candidate) => candidate.kind === category).length >= limit) break;
+    pushUnique(selected, event);
+  }
+}
+
+/** Keep continuation state deterministic and recent-first with fixed category caps. */
+function prioritizedImportantEvents(events: readonly ImportantEvent[]): ImportantEvent[] {
+  const delegates = events.filter((event) => event.kind === "delegate");
+  const verifications = events.filter((event) => event.kind === "verification");
+  const failedVerifications = verifications.filter((event) => event.verificationFailed);
+  const passedVerifications = verifications.filter((event) => !event.verificationFailed);
+  const edits = events.filter((event) => event.kind === "edit");
+  const failures = events.filter((event) => event.kind === "failure");
+  const other = events.filter((event) => event.kind === "other");
+  const selected: ImportantEvent[] = [];
+
+  // Anchor the newest continuation/file/failure signals before older state.
+  pushUnique(selected, delegates.at(-1));
+  pushUnique(selected, failedVerifications.at(-1) ?? verifications.at(-1));
+  pushUnique(selected, edits.at(-1));
+  takeRecent(selected, delegates, "delegate", IMPORTANT_EVENT_CAPS.delegate);
+  const failedVerificationLimit = Math.min(IMPORTANT_EVENT_CAPS.verification, failedVerifications.length);
+  for (const event of recentEvents(failedVerifications, failedVerificationLimit)) {
+    if (selected.filter((candidate) => candidate.kind === "verification").length >= IMPORTANT_EVENT_CAPS.verification) break;
+    pushUnique(selected, event);
+  }
+  const passedVerificationLimit = IMPORTANT_EVENT_CAPS.verification - failedVerificationLimit;
+  takeRecent(selected, passedVerifications, "verification", passedVerificationLimit);
+  takeRecent(selected, edits, "edit", IMPORTANT_EVENT_CAPS.edit);
+  takeRecent(selected, failures, "failure", IMPORTANT_EVENT_CAPS.failure);
+  takeRecent(selected, other, "other", IMPORTANT_EVENT_CAPS.other);
+
+  const selectedSet = new Set(selected);
+  const older = events
+    .filter((event) => !selectedSet.has(event))
+    .slice()
+    .sort((left, right) => right.index - left.index)
+    .slice(0, MAX_OLDER_IMPORTANT_EVENTS);
+  return [...selected, ...older];
+}
+
+function summaryEvents(messages: readonly Message[]): SummaryEvents {
   const goal: string[] = [];
-  const important: string[] = [];
+  const important: ImportantEvent[] = [];
   const ordinary: string[] = [];
   const firstUser = messages.find((message) => message.role === "user");
   const goalText = firstUser ? compactSnippet(textOf(firstUser), 500) : "";
@@ -295,13 +377,26 @@ function summaryEvents(messages: readonly Message[]): { goal: string[]; importan
     const message = messages[index]!;
     if (message.role === "toolResult") {
       const lines = toolSummary(messages, index);
-      if (
-        message.toolName === "delegate"
-        || message.toolName === "verification"
-        || message.toolName === "edit"
-        || message.isError
-      ) important.push(...lines);
-      else ordinary.push(...lines);
+      let kind: ImportantEventKind | undefined;
+      let failed: boolean | undefined;
+      if (message.toolName === "delegate") kind = "delegate";
+      else if (message.toolName === "verification") {
+        kind = "verification";
+        const details = detailsOf(message);
+        failed = message.isError === true || details?.ok !== true;
+      } else if (message.toolName === "edit" && !message.isError) kind = "edit";
+      else if (message.isError) kind = "failure";
+
+      if (kind) {
+        important.push({
+          kind,
+          index,
+          lines,
+          ...(failed === undefined ? {} : { verificationFailed: failed }),
+        });
+      } else {
+        ordinary.push(...lines);
+      }
       continue;
     }
     if (message.role === "user" && message !== firstUser) {
@@ -323,7 +418,12 @@ function summaryFor(messages: readonly Message[], maxChars = SUMMARY_CHARS, inte
   const events = summaryEvents(messages);
   const sections: string[][] = [];
   if (events.goal.length) sections.push(["", "Goal:", ...events.goal]);
-  const important = [...(interruptions ? ["- Previous tool execution was interrupted before all tool calls completed."] : []), ...(orphans ? ["- An unmatched historical tool result was omitted."] : []), ...events.important];
+  const importantLines = prioritizedImportantEvents(events.important).flatMap((event) => event.lines);
+  const important = [
+    ...importantLines,
+    ...(interruptions ? ["- Previous tool execution was interrupted before all tool calls completed."] : []),
+    ...(orphans ? ["- An unmatched historical tool result was omitted."] : []),
+  ];
   if (important.length) sections.push(["", "Important state:", ...important]);
   if (events.tail.length) sections.push(["", "Recent historical state:", ...events.tail]);
 
@@ -338,14 +438,194 @@ function summaryFor(messages: readonly Message[], maxChars = SUMMARY_CHARS, inte
   return { role: "user", content: content.slice(0, maxChars), timestamp: 0 };
 }
 
+function compactRecord(value: unknown): Record<string, unknown> | undefined {
+  const record = objectOf(value);
+  return record && !Array.isArray(value) ? record : undefined;
+}
+
+function boundedNumber(value: unknown): number | null | undefined {
+  return typeof value === "number" && Number.isFinite(value)
+    ? value
+    : value === null
+      ? null
+      : undefined;
+}
+
+function boundedBoolean(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function putIfDefined(target: Record<string, unknown>, key: string, value: unknown): void {
+  if (value !== undefined) target[key] = value;
+}
+
+function compactBashDetails(value: unknown): Record<string, unknown> | undefined {
+  const source = compactRecord(value);
+  if (!source) return undefined;
+  const result: Record<string, unknown> = {};
+  putIfDefined(result, "exitCode", boundedNumber(source.exitCode));
+  for (const key of ["stdoutTruncated", "stderrTruncated", "timedOut", "aborted"] as const) {
+    putIfDefined(result, key, boundedBoolean(source[key]));
+  }
+  putIfDefined(result, "cwd", safeString(source.cwd, 160));
+  return Object.keys(result).length ? result : undefined;
+}
+
+function compactReadDetails(value: unknown): Record<string, unknown> | undefined {
+  const source = compactRecord(value);
+  if (!source) return undefined;
+  const result: Record<string, unknown> = {};
+  putIfDefined(result, "path", safeString(source.path, 240));
+  putIfDefined(result, "bytes", boundedNumber(source.bytes));
+  putIfDefined(result, "truncated", boundedBoolean(source.truncated));
+  return Object.keys(result).length ? result : undefined;
+}
+
+function compactEditDetails(value: unknown): Record<string, unknown> | undefined {
+  const source = compactRecord(value);
+  if (!source) return undefined;
+  const result: Record<string, unknown> = {};
+  putIfDefined(result, "path", safeString(source.path, 240));
+  putIfDefined(result, "created", boundedBoolean(source.created));
+  return Object.keys(result).length ? result : undefined;
+}
+
+function compactDelegateEntry(value: unknown): Record<string, unknown> | undefined {
+  const source = compactRecord(value);
+  if (!source) return undefined;
+  const result: Record<string, unknown> = {};
+  putIfDefined(result, "status", safeString(source.status, 48));
+  putIfDefined(result, "summary", safeString(source.summary, PROVIDER_DETAIL_STRING_LIMIT));
+  putIfDefined(result, "filesChanged", stringList(source.filesChanged, MAX_FILES));
+  putIfDefined(result, "sessionId", safeString(source.sessionId, 128));
+  putIfDefined(result, "detail", safeString(source.detail, PROVIDER_DETAIL_STRING_LIMIT));
+  putIfDefined(result, "error", safeString(source.error, PROVIDER_DETAIL_STRING_LIMIT));
+  if (Array.isArray(source.verification)) {
+    const verification = source.verification.slice(0, MAX_VERIFICATIONS).flatMap((raw) => {
+      const entry = compactRecord(raw);
+      if (!entry) return [];
+      const compact: Record<string, unknown> = {};
+      putIfDefined(compact, "command", safeString(entry.command, 160));
+      putIfDefined(compact, "status", safeString(entry.status, 48));
+      putIfDefined(compact, "summary", safeString(entry.summary, PROVIDER_DETAIL_STRING_LIMIT));
+      return Object.keys(compact).length ? [compact] : [];
+    });
+    if (verification.length) result.verification = verification;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+function compactDelegateDetails(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    const results = value.slice(0, 3).flatMap((entry) => {
+      const compact = compactDelegateEntry(entry);
+      return compact ? [compact] : [];
+    });
+    return results.length ? results : undefined;
+  }
+  const source = compactRecord(value);
+  if (!source) return undefined;
+  if (Array.isArray(source.results)) {
+    const results = source.results.slice(0, 3).flatMap((entry) => {
+      const compact = compactDelegateEntry(entry);
+      return compact ? [compact] : [];
+    });
+    return results.length ? results : undefined;
+  }
+  return compactDelegateEntry(source);
+}
+
+function compactVerificationDetails(value: unknown): Record<string, unknown> | undefined {
+  const source = compactRecord(value);
+  if (!source) return undefined;
+  const result: Record<string, unknown> = {};
+  putIfDefined(result, "action", safeString(source.action, 80));
+  putIfDefined(result, "cwd", safeString(source.cwd, 160));
+  putIfDefined(result, "ok", boundedBoolean(source.ok));
+  putIfDefined(result, "error", safeString(source.error, PROVIDER_DETAIL_STRING_LIMIT));
+  if (Array.isArray(source.results)) {
+    const results = source.results.slice(0, MAX_VERIFICATIONS).flatMap((raw) => {
+      const entry = compactRecord(raw);
+      if (!entry) return [];
+      const compact: Record<string, unknown> = {};
+      putIfDefined(compact, "command", safeString(entry.command, 180));
+      putIfDefined(compact, "status", safeString(entry.status, 48));
+      putIfDefined(compact, "exitCode", boundedNumber(entry.exitCode));
+      putIfDefined(compact, "ok", boundedBoolean(entry.ok));
+      putIfDefined(compact, "timedOut", boundedBoolean(entry.timedOut));
+      putIfDefined(compact, "stdoutTruncated", boundedBoolean(entry.stdoutTruncated));
+      putIfDefined(compact, "stderrTruncated", boundedBoolean(entry.stderrTruncated));
+      if (entry.ok !== true) {
+        putIfDefined(
+          compact,
+          "summary",
+          safeString(entry.summary, PROVIDER_DETAIL_STRING_LIMIT)
+            ?? safeString(entry.stderr, PROVIDER_DETAIL_STRING_LIMIT)
+            ?? safeString(entry.stdout, PROVIDER_DETAIL_STRING_LIMIT),
+        );
+      }
+      return Object.keys(compact).length ? [compact] : [];
+    });
+    if (results.length) result.results = results;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+function compactSearchDetails(name: string, value: unknown): Record<string, unknown> | undefined {
+  const source = compactRecord(value);
+  if (!source) return undefined;
+  const result: Record<string, unknown> = {};
+  putIfDefined(result, name === "memory_search" ? "scope" : "role", safeString(source[name === "memory_search" ? "scope" : "role"], 48));
+  putIfDefined(result, "count", boundedNumber(source.count));
+  if (Array.isArray(source.matches)) {
+    const matches = source.matches.slice(0, MAX_SEARCH_MATCHES).flatMap((raw) => {
+      const entry = compactRecord(raw);
+      if (!entry) return [];
+      const compact: Record<string, unknown> = {};
+      for (const key of ["id", "scope", "role", "sessionId"] as const) {
+        putIfDefined(compact, key, safeString(entry[key], PROVIDER_DETAIL_MATCH_LIMIT));
+      }
+      putIfDefined(compact, "timestamp", boundedNumber(entry.timestamp));
+      putIfDefined(compact, "score", boundedNumber(entry.score));
+      putIfDefined(compact, "snippet", safeString(entry.snippet, PROVIDER_DETAIL_MATCH_LIMIT));
+      if (Array.isArray(entry.snippets)) {
+        const snippets = entry.snippets.slice(0, MAX_SEARCH_MATCHES).flatMap((snippet) => {
+          const compactSnippetValue = safeString(snippet, PROVIDER_DETAIL_MATCH_LIMIT);
+          return compactSnippetValue ? [compactSnippetValue] : [];
+        });
+        if (snippets.length) compact.snippets = snippets;
+      }
+      return Object.keys(compact).length ? [compact] : [];
+    });
+    if (matches.length) result.matches = matches;
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+/** Whitelist compact runtime metadata for provider context; unknown details are omitted. */
+function compactToolResultDetails(name: string, value: unknown): unknown {
+  if (name === "bash") return compactBashDetails(value);
+  if (name === "read") return compactReadDetails(value);
+  if (name === "edit") return compactEditDetails(value);
+  if (name === "delegate") return compactDelegateDetails(value);
+  if (name === "verification") return compactVerificationDetails(value);
+  if (name === "memory_search" || name === "session_search") return compactSearchDetails(name, value);
+  return undefined;
+}
+
 function truncateRecentToolResult(message: Message, chars: number): Message {
   if (message.role !== "toolResult") return message;
   const text = textOf(message);
-  if (text.length <= chars) return message;
   const half = Math.max(1, Math.floor((chars - 100) / 2));
+  const content = text.length <= chars
+    ? message.content
+    : [{ type: "text" as const, text: `${text.slice(0, half)}\n… [tool result truncated, ${text.length} chars total] …\n${text.slice(-half)}` }];
+  const details = compactToolResultDetails(message.toolName, message.details);
+  const { details: _details, ...withoutDetails } = message;
   return {
-    ...message,
-    content: [{ type: "text", text: `${text.slice(0, half)}\n… [tool result truncated, ${text.length} chars total] …\n${text.slice(-half)}` }],
+    ...withoutDetails,
+    content,
+    ...(details === undefined ? {} : { details }),
   };
 }
 

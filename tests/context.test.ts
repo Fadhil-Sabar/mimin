@@ -27,6 +27,19 @@ const toolResult = (
 
 const contextText = (messages: readonly Message[]): string => JSON.stringify(messages);
 
+const toolGroup = (
+  id: string,
+  name: string,
+  args: Record<string, unknown>,
+  text: string,
+  timestamp: number,
+  details?: Record<string, unknown>,
+  isError = false,
+): Message[] => [
+  assistant([{ type: "toolCall", id, name, arguments: args }], timestamp),
+  toolResult(id, name, text, timestamp + 1, details, isError),
+];
+
 describe("context compaction", () => {
   test("leaves an under-budget history unchanged", () => {
     const messages: Message[] = [{ role: "user", content: "small request", timestamp: 1 }];
@@ -75,6 +88,128 @@ describe("context compaction", () => {
     expect(JSON.stringify(compactTool)).toContain("tool result truncated");
     expect(JSON.stringify(tool)).toContain(huge);
     expect(result.estimatedTokens).toBeLessThanOrEqual(result.usableTokens);
+  });
+
+  test("compacts provider bash details without mutating the stored result", () => {
+    const stdout = "stdout-" + "o".repeat(50_000);
+    const stderr = "stderr-" + "e".repeat(50_000);
+    const details = {
+      exitCode: 1,
+      stdout,
+      stderr,
+      stdoutTruncated: true,
+      stderrTruncated: true,
+      timedOut: false,
+      aborted: false,
+      cwd: ".",
+      rawLog: "raw-" + "x".repeat(10_000),
+    };
+    const messages: Message[] = [
+      { role: "user", content: "run the command", timestamp: 1 },
+      { role: "user", content: "old chatter ".repeat(1_000), timestamp: 2 },
+      ...toolGroup("bash-huge", "bash", { command: "test-command" }, "result-" + "r".repeat(50_000), 3, details, true),
+    ];
+    const original = JSON.stringify(messages);
+    const built = buildContext(messages, { maxTokens: 900, reserveTokens: 100 });
+    const compactTool = built.messages.find((message) => message.role === "toolResult");
+    expect(compactTool).toMatchObject({ details: {
+      exitCode: 1,
+      stdoutTruncated: true,
+      stderrTruncated: true,
+      timedOut: false,
+      aborted: false,
+      cwd: ".",
+    } });
+    expect(JSON.stringify(compactTool)).not.toContain(stdout);
+    expect(JSON.stringify(compactTool)).not.toContain(stderr);
+    expect(JSON.stringify(compactTool)).not.toContain("raw-xxxxxxxx");
+    expect(JSON.stringify(compactTool)).toContain("tool result truncated");
+    expect(JSON.stringify(messages)).toBe(original);
+    expect(messages[3]).toMatchObject({ details });
+    expect(built.estimatedTokens).toBeLessThanOrEqual(built.usableTokens);
+    expect(validateContextToolIntegrity(built.messages)).toBe(true);
+  });
+
+  test("does not pay twice for duplicated tool content and details", () => {
+    const duplicate = "duplicate-output-" + "d".repeat(50_000);
+    const messages: Message[] = [
+      { role: "user", content: "inspect output", timestamp: 1 },
+      { role: "user", content: "old chatter ".repeat(1_000), timestamp: 2 },
+      ...toolGroup("bash-duplicate", "bash", { command: "duplicate" }, duplicate, 3, {
+        stdout: duplicate,
+        stderr: duplicate,
+        exitCode: 0,
+        stdoutTruncated: false,
+        stderrTruncated: false,
+        timedOut: false,
+        aborted: false,
+        cwd: ".",
+      }),
+    ];
+    const built = buildContext(messages, { maxTokens: 900, reserveTokens: 100 });
+    const compactTool = built.messages.find((message) => message.role === "toolResult");
+    expect(compactTool).toMatchObject({ details: { exitCode: 0, cwd: "." } });
+    expect(JSON.stringify(compactTool)).not.toContain(duplicate);
+    expect(built.estimatedTokens).toBeLessThanOrEqual(built.usableTokens);
+    expect(JSON.stringify(messages)).toContain(duplicate);
+  });
+
+  test("keeps latest delegate, failed verification, and edit state under summary pressure", () => {
+    const messages: Message[] = [{ role: "user", content: "Original goal", timestamp: 1 }];
+    for (let index = 0; index < 20; index += 1) {
+      messages.push(...toolGroup(`old-edit-${index}`, "edit", { path: `src/old-${index}.ts` }, "updated", index * 3 + 2, { path: `src/old-${index}.ts`, created: false }));
+    }
+    for (let index = 0; index < 8; index += 1) {
+      messages.push(...toolGroup(`old-delegate-${index}`, "delegate", { task: `old task ${index}` }, "delegated", index * 3 + 100, {
+        status: "complete",
+        summary: `old delegate ${index}`,
+        filesChanged: [`src/old-${index}.ts`],
+        verification: [],
+        sessionId: `sidekick-${index}`,
+      }));
+    }
+    for (let index = 0; index < 5; index += 1) {
+      messages.push(...toolGroup(`old-verification-${index}`, "verification", { action: "test" }, "passed", index * 3 + 130, {
+        action: "test", cwd: ".", ok: true, results: [{ command: "bun test", exitCode: 0, ok: true, stdout: "passed" }],
+      }));
+    }
+    messages.push(...toolGroup("latest-delegate", "delegate", { task: "finish auth" }, "latest delegate", 200, {
+      status: "partial",
+      summary: "Latest sidekick needs continuation",
+      filesChanged: ["src/auth.ts"],
+      verification: [],
+      sessionId: "sidekick-latest",
+    }));
+    messages.push(...toolGroup("latest-verification", "verification", { action: "test" }, "failed", 202, {
+      action: "test", cwd: ".", ok: false, results: [{ command: "bun test", exitCode: 1, ok: false, stderr: "latest verification failed" }],
+    }, true));
+    messages.push({ role: "user", content: "chatter ".repeat(200), timestamp: 300 });
+    const built = buildContext(messages, { maxTokens: 1_000, reserveTokens: 100 });
+    const summary = contextText(built.messages);
+    expect(summary).toContain("Original goal");
+    expect(summary).toContain("sidekick-latest");
+    expect(summary).toContain("src/auth.ts");
+    expect(summary).toContain("latest verification failed");
+    expect(built.estimatedTokens).toBeLessThanOrEqual(built.usableTokens);
+  });
+
+  test("prefers the newest edited path and delegate session id", () => {
+    const messages: Message[] = [{ role: "user", content: "Track workspace changes", timestamp: 1 }];
+    for (let index = 1; index <= 20; index += 1) {
+      messages.push(...toolGroup(`edit-${index}`, "edit", { path: `src/${index}.ts` }, "updated", index * 3, { path: `src/${index}.ts`, created: false }));
+      messages.push(...toolGroup(`delegate-${index}`, "delegate", { task: `task ${index}` }, "delegated", index * 3 + 2, {
+        status: "partial", summary: `delegate ${index}`, filesChanged: [`src/${index}.ts`], verification: [], sessionId: `sidekick-${index}`,
+      }));
+    }
+    messages.push(...toolGroup("edit-latest", "edit", { path: "src/latest.ts" }, "updated", 1000, { path: "src/latest.ts", created: false }));
+    messages.push(...toolGroup("delegate-latest", "delegate", { task: "latest" }, "delegated", 1002, {
+      status: "partial", summary: "latest delegate", filesChanged: ["src/latest.ts"], verification: [], sessionId: "sidekick-latest",
+    }));
+    messages.push({ role: "user", content: "final chatter ".repeat(200), timestamp: 1100 });
+    const built = buildContext(messages, { maxTokens: 1_000, reserveTokens: 100 });
+    const summary = contextText(built.messages);
+    expect(summary).toContain("src/latest.ts");
+    expect(summary).toContain("sidekick-latest");
   });
 
   test("preserves delegate continuation state and manager-facing result fields", () => {
