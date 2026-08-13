@@ -25,7 +25,11 @@ import type {
   ToolExecutionResult,
   ToolExecutionValue,
 } from "./types.js";
-import { buildContext, type ContextDiagnostics } from "../context/context.js";
+import {
+  buildContext,
+  ContextBudgetExceededError,
+  type ContextDiagnostics,
+} from "../context/context.js";
 
 export type AgentStreamFactory = (
   model: Model<Api>,
@@ -193,13 +197,23 @@ export async function runAgent<TApi extends Api = Api>(
     }
 
     turns += 1;
-    const contextMessages = config?.context
-      ? buildContext(messages, {
-        ...config.context,
-        modelContextWindow: options.model.contextWindow,
-        systemPrompt: options.systemPrompt,
-      })
-      : undefined;
+    let contextMessages;
+    try {
+      contextMessages = config?.context
+        ? buildContext(messages, {
+          ...config.context,
+          modelContextWindow: options.model.contextWindow,
+          systemPrompt: options.systemPrompt,
+        })
+        : undefined;
+    } catch (error) {
+      if (error instanceof ContextBudgetExceededError) {
+        return finish("error", {
+          error: `Agent context exceeds the configured model budget (available: ${error.availableTokens} estimated tokens, required newest context: ${error.requiredTokens}).`,
+        });
+      }
+      return finish("error", { error: errorText(error) });
+    }
     contextDiagnostics = contextMessages?.diagnostics;
     const context: Context = {
       ...(options.systemPrompt === undefined

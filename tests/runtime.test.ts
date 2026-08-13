@@ -8,6 +8,7 @@ function config(dataDir = "/data/root"): AgentConfig {
     manager: { provider: "fake", model: "manager", thinking: "off" },
     sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
     memory: { auto: true },
+    context: { maxTokens: 32_000, reserveTokens: 8_000 },
   };
 }
 

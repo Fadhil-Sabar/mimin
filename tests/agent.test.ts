@@ -319,4 +319,27 @@ describe("runAgent", () => {
     // The loop ran well beyond the old 8-turn limit before aborting.
     expect(result.turns).toBeGreaterThan(8);
   });
+
+  test("returns a clean terminal error when required context exceeds the budget", async () => {
+    let streamed = false;
+    const messages: Message[] = [
+      { role: "user", content: "x".repeat(8_000), timestamp: 1 },
+    ];
+
+    const result = await runAgent({
+      model,
+      messages,
+      config: { context: { maxTokens: 300, reserveTokens: 100 } },
+      stream: () => {
+        streamed = true;
+        return completedStream(assistant([{ type: "text", text: "unexpected" }], "stop", 2));
+      },
+    });
+
+    expect(result.status).toBe("error");
+    expect(result.error).toContain("Agent context exceeds the configured model budget");
+    expect(result.error).not.toContain("xxxxxxxx");
+    expect(streamed).toBe(false);
+    expect(messages).toHaveLength(1);
+  });
 });
