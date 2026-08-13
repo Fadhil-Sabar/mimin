@@ -23,6 +23,15 @@ export interface MemoryConfig {
   auto: boolean;
 }
 
+export interface SecurityConfig {
+  /**
+   * Prepend an injection-defense notice to the system prompt for both roles.
+   * Defaults to true. The notice tells the model that file contents and
+   * command output are untrusted data, not instructions.
+   */
+  injectionWarning: boolean;
+}
+
 /** Bounded provider input context, leaving room for responses and tool calls. */
 export interface ContextConfig {
   maxTokens: number;
@@ -34,6 +43,7 @@ export interface AgentConfig {
   manager: RoleConfig;
   sidekick: RoleConfig;
   memory: MemoryConfig;
+  security: SecurityConfig;
   /** Optional in the public type for compatibility with programmatic callers. */
   context?: ContextConfig;
 }
@@ -206,6 +216,15 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     auto: typeof auto === "boolean" ? auto : true,
   };
 
+  const securityRaw = isObject(raw.security) ? raw.security : {};
+  const injectionWarning = securityRaw.injectionWarning;
+  if (injectionWarning !== undefined && typeof injectionWarning !== "boolean") {
+    issues.push("security.injectionWarning must be a boolean");
+  }
+  const securityConfig: SecurityConfig = {
+    injectionWarning: typeof injectionWarning === "boolean" ? injectionWarning : true,
+  };
+
   const contextRaw = isObject(raw.context) ? raw.context : {};
   const maxTokens = contextRaw.maxTokens;
   const reserveTokens = contextRaw.reserveTokens;
@@ -252,6 +271,7 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     manager: managerConfig,
     sidekick: sidekickConfig,
     memory: memoryConfig,
+    security: securityConfig,
     context: contextConfig,
   };
 }
@@ -281,6 +301,7 @@ export function defaultConfig(options: LoadConfigOptions = {}): AgentConfig {
     manager: { provider: "", model: "", thinking: "medium" },
     sidekick: { provider: "", model: "", thinking: "medium" },
     memory: { auto: true },
+    security: { injectionWarning: true },
     context: { maxTokens: 32_000, reserveTokens: 8_000 },
   };
 }
@@ -310,6 +331,7 @@ export async function loadConfig(
         manager: defaults.manager,
         sidekick: defaults.sidekick,
         memory: defaults.memory,
+        security: defaults.security,
         context: defaults.context,
       },
       globalLayer,

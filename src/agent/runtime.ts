@@ -1,4 +1,4 @@
-import type { AgentConfig, ContextConfig, MemoryConfig, RoleConfig } from "../config.js";
+import type { AgentConfig, ContextConfig, MemoryConfig, RoleConfig, SecurityConfig } from "../config.js";
 
 /**
  * Mutable role configuration for one interactive session.
@@ -13,6 +13,7 @@ export class AgentRuntime {
   readonly dataDir: string;
   readonly memory: MemoryConfig;
   readonly context: ContextConfig;
+  readonly security: SecurityConfig;
   manager: RoleConfig;
   sidekick: RoleConfig;
 
@@ -20,6 +21,9 @@ export class AgentRuntime {
     this.dataDir = config.dataDir;
     this.memory = { ...config.memory };
     this.context = { ...(config.context ?? { maxTokens: 32_000, reserveTokens: 8_000 }) };
+    this.security = {
+      ...(config.security ?? { injectionWarning: true }),
+    };
     this.manager = { ...config.manager };
     this.sidekick = { ...config.sidekick };
   }
@@ -31,6 +35,7 @@ export class AgentRuntime {
       manager: { ...this.manager },
       sidekick: { ...this.sidekick },
       memory: this.memory,
+      security: this.security,
       context: this.context,
     };
   }

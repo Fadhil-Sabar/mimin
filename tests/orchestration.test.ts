@@ -80,6 +80,7 @@ const config = (dataDir: string): AgentConfig => ({
   manager: { provider: "fake-provider", model: "manager", thinking: "off" },
   sidekick: { provider: "fake-provider", model: "sidekick", thinking: "off" },
   memory: { auto: true },
+  security: { injectionWarning: true },
 });
 
 function assistant(
@@ -1688,6 +1689,7 @@ describe("commandcode env credential forwarding", () => {
           manager: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
           sidekick: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "low" },
           memory: { auto: true },
+      security: { injectionWarning: true },
         },
         modelResolver: () => ({
           id: "gpt-5.5",
@@ -1736,6 +1738,7 @@ describe("commandcode env credential forwarding", () => {
           manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
           sidekick: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "low" },
           memory: { auto: true },
+      security: { injectionWarning: true },
         },
         modelResolver: () => ({
           id: "claude-sonnet-4-6",
@@ -1950,6 +1953,7 @@ describe("commandcode env credential forwarding", () => {
           manager: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
           sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
           memory: { auto: true },
+      security: { injectionWarning: true },
         },
         sidekickAuthKey: "sk-sidekick-only",
         sidekickRun: sidekickRun as never,
@@ -2024,6 +2028,7 @@ describe("commandcode env credential forwarding", () => {
           manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
           sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
           memory: { auto: true },
+      security: { injectionWarning: true },
         },
         // The tools layer only ever forwards the sidekick's own key; the
         // manager's key never enters this path (it lives on runManager).

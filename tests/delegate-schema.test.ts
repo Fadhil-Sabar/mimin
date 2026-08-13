@@ -41,6 +41,7 @@ const config = (dataDir: string): AgentConfig => ({
   manager: { provider: "fake-provider", model: "manager", thinking: "off" },
   sidekick: { provider: "fake-provider", model: "sidekick", thinking: "off" },
   memory: { auto: true },
+  security: { injectionWarning: true },
 });
 
 function executionContext(toolName: string): ToolExecutionContext {

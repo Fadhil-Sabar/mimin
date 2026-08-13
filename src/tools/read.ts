@@ -6,6 +6,7 @@ import type {
   ToolExecutionContext,
   ToolExecutionResult,
 } from "../agent/types.js";
+import { classifyUntrustedContent, tagUntrustedToolResult } from "../context/untrusted.js";
 import { resolveWorkspacePath } from "./path.js";
 
 const DEFAULT_READ_LIMIT = 256 * 1024;
@@ -48,13 +49,18 @@ export function createReadTool(workspace: string): AnyAgentTool {
       const truncated = fileInfo.size > limit;
       const text = await file.slice(0, limit).text();
       const workspaceRoot = await resolveWorkspacePath(workspace, ".");
+      const relativePath = relative(workspaceRoot, filePath) || ".";
+      const classified = classifyUntrustedContent(text);
 
       return {
-        text,
+        text: tagUntrustedToolResult(text, {
+          source: relativePath,
+        }),
         details: {
-          path: relative(workspaceRoot, filePath) || ".",
+          path: relativePath,
           bytes: fileInfo.size,
           truncated,
+          ...(classified.suspicious ? { injectionRisk: classified.flags.map((flag) => flag.label) } : {}),
         },
       };
     },

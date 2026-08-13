@@ -1,13 +1,14 @@
 import { join } from "node:path";
 import type { Api, AssistantMessage, Model } from "@mariozechner/pi-ai";
 import sidekickPrompt from "../../prompts/sidekick.md" with { type: "text" };
-import type { RoleConfig } from "../config.js";
+import type { RoleConfig, SecurityConfig } from "../config.js";
 import { SessionStore } from "../session/session.js";
 import { createBashTool } from "../tools/bash.js";
 import { createEditTool } from "../tools/edit.js";
 import { createReadTool } from "../tools/read.js";
 import { commandCodeCredentials, modelFromRole, type ModelResolver } from "./model.js";
 import { runAgent } from "./run.js";
+import { withInjectionWarning } from "./security-prompt.js";
 import type {
   AgentEvent,
   AgentRunConfig,
@@ -103,6 +104,8 @@ export interface RunSidekickOptions {
   /** The manager role; used as the model fallback when the sidekick's own
    *  provider/model is empty (inherit). */
   managerRole?: RoleConfig;
+  /** Security settings for the system prompt injection warning. */
+  security?: SecurityConfig;
   signal?: AbortSignal;
   onActivity?: SidekickActivityCallback;
   now?: () => number;
@@ -330,7 +333,10 @@ export async function runSidekick(
       options.model ??
       modelFromRole(options.config, options.modelResolver, options.managerRole);
     const run = options.run ?? ((runOptions) => runAgent(runOptions));
-    const baseSystemPrompt = options.systemPrompt ?? sidekickPrompt;
+    const baseSystemPrompt = withInjectionWarning(
+      options.systemPrompt ?? sidekickPrompt,
+      options.security,
+    );
     const systemPrompt = options.sessionId
       ? `${baseSystemPrompt}\n\n${SIDEKICK_CONTINUATION_SYSTEM_NOTE}`
       : baseSystemPrompt;

@@ -4,6 +4,9 @@
     "maxTokens": 32000,
     "reserveTokens": 8000
   },
+  "security": {
+    "injectionWarning": true
+  },
   "manager": {
     "provider": "anthropic",
     "model": "claude-sonnet-4-6",

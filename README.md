@@ -30,7 +30,8 @@ export COMMANDCODE_API_KEY='...'
 ```json
 {
   "manager": { "provider": "commandcode", "model": "gpt-5.5", "thinking": "medium" },
-  "sidekick": { "provider": "commandcode", "model": "deepseek/deepseek-v4-flash", "thinking": "low" }
+  "sidekick": { "provider": "commandcode", "model": "deepseek/deepseek-v4-flash", "thinking": "low" },
+  "security": { "injectionWarning": true }
 }
 ```
 
@@ -79,6 +80,16 @@ An optional `memory` section controls automatic long-term memory learning:
 ```
 
 It defaults to `true` (see [Automatic memory](#automatic-memory-v020) under `/memory`).
+
+An optional `security` section controls the prompt-injection defense:
+
+```json
+{
+  "security": { "injectionWarning": false }
+}
+```
+
+It defaults to `true`. When enabled, mimin prepends a security notice to both the manager and sidekick system prompts, and tags file contents and command output as untrusted data in the provider context. The heuristic scan flags common injection patterns (behavior overrides, secret exfiltration requests, hidden instructions, output-control phrasing) and surfaces the risk in the tool result details. This is defense in depth, not a guarantee: treat repository files and command output as untrusted input.
 
 ## Usage
 

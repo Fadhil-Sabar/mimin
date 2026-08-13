@@ -37,6 +37,7 @@ async function fixture(): Promise<{ workspace: string; config: AgentConfig }> {
       manager: { provider: "fake", model: "manager", thinking: "off" },
       sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
       memory: { auto: true },
+      security: { injectionWarning: true },
     },
   };
 }
@@ -174,6 +175,7 @@ describe("CLI argument and noninteractive paths", () => {
       manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
       sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
       memory: { auto: true },
+      security: { injectionWarning: true },
     };
     const io = captureIo();
     const previous = process.env.COMMANDCODE_API_KEY;
@@ -348,6 +350,7 @@ describe("interactive integration", () => {
       manager: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "off" },
       sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
       memory: { auto: true },
+      security: { injectionWarning: true },
     };
     const previous = process.env.COMMANDCODE_API_KEY;
     delete process.env.COMMANDCODE_API_KEY;

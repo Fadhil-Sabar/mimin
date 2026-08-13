@@ -5,6 +5,7 @@ import type {
   ToolExecutionContext,
   ToolExecutionResult,
 } from "../agent/types.js";
+import { tagUntrustedToolResult } from "../context/untrusted.js";
 import { assertWorkspaceCommand } from "./path.js";
 
 const DEFAULT_OUTPUT_LIMIT = 64 * 1024;
@@ -64,7 +65,10 @@ function formatOutput(stdout: string, stderr: string, exitCode: number | null): 
   const sections = [`exitCode: ${exitCode === null ? "unknown" : exitCode}`];
   if (stdout) sections.push(`stdout:\n${stdout}`);
   if (stderr) sections.push(`stderr:\n${stderr}`);
-  return sections.join("\n");
+  const body = sections.join("\n");
+  // Command output is externally produced and must be tagged as untrusted so
+  // the model does not treat instructions inside it as authoritative.
+  return tagUntrustedToolResult(body);
 }
 
 /** Create a bounded Bun.spawn-backed shell tool rooted at `workspace`. */

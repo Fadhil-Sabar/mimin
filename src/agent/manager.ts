@@ -22,6 +22,7 @@ import {
 import type { VerificationSpawn } from "../tools/verification.js";
 import { commandCodeCredentials, modelFromRole, type ModelResolver } from "./model.js";
 import { runAgent } from "./run.js";
+import { withInjectionWarning } from "./security-prompt.js";
 import type {
   AgentStreamFactory,
   RunAgentOptions,
@@ -98,6 +99,7 @@ export function createManagerTools(
       ...(options.sidekickAuthKey !== undefined
         ? { authKey: options.sidekickAuthKey }
         : {}),
+      security: options.config.security,
     },
     run: options.sidekickRunner,
     maxConcurrency: options.maxDelegationConcurrency,
@@ -169,9 +171,13 @@ export async function runManager(
 
   const model = options.model ?? modelFromRole(options.config.manager, options.modelResolver);
   const run = options.run ?? ((runOptions) => runAgent(runOptions));
+  const systemPrompt = withInjectionWarning(
+    options.systemPrompt ?? managerPrompt,
+    options.config.security,
+  );
   const result = await run({
     model,
-    systemPrompt: options.systemPrompt ?? managerPrompt,
+    systemPrompt,
     session,
     tools: createManagerTools({
       workspace: options.workspace,
