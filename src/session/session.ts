@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, readdir } from "node:fs/promises";
+import { access, appendFile, mkdir, open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import type { Message } from "@mariozechner/pi-ai";
@@ -128,7 +128,7 @@ async function readLines(pathname: string): Promise<SessionLine[]> {
 
 async function fileExists(pathname: string): Promise<boolean> {
   try {
-    await open(pathname, "r");
+    await access(pathname);
     return true;
   } catch (error) {
     if (error instanceof Error && "code" in error && error.code === "ENOENT") {

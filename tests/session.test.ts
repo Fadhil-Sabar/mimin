@@ -79,4 +79,32 @@ describe("JSONL sessions", () => {
     ]);
     await expect(store.loadSession("manager", sidekick.id)).rejects.toThrow();
   });
+
+  test("loadSession loads a valid sidekick session", async () => {
+    const root = await fixture();
+    const store = new SessionStore({ root });
+    const sidekick = await store.createSession("sidekick");
+
+    const loaded = await store.loadSession("sidekick", sidekick.id);
+
+    expect(loaded.id).toBe(sidekick.id);
+    expect(loaded.role).toBe("sidekick");
+  });
+
+  test("loadSession rejects an unknown sidekick id", async () => {
+    const root = await fixture();
+    const store = new SessionStore({ root });
+
+    await expect(store.loadSession("sidekick", "unknown-id")).rejects.toThrow();
+  });
+
+  test("loadSession reports a role mismatch for a manager id loaded as sidekick", async () => {
+    const root = await fixture();
+    const store = new SessionStore({ root });
+    const manager = await store.createSession("manager");
+
+    await expect(store.loadSession("sidekick", manager.id)).rejects.toThrow(
+      /not a sidekick/i,
+    );
+  });
 });

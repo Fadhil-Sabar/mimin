@@ -26,6 +26,10 @@ import {
   DelegationTracker,
   gitWorkspaceState,
   normalizeDelegationTask,
+  type DelegationAttempt,
+  type DelegationCompletion,
+  type DelegationReservation,
+  type DelegationStartResult,
 } from "../src/tools/delegation-tracker.js";
 import type { AnyAgentTool, ToolExecutionContext } from "../src/agent/types.js";
 
@@ -146,6 +150,41 @@ async function execute(
   turn?: number,
 ) {
   return tool.execute(args, executionContext(tool.name, signal, turn));
+}
+
+/**
+ * Test-only tracker that records every start/finish/cancel transition without
+ * changing the production lifecycle semantics. Used to assert the exact
+ * bookkeeping surface the delegate worker is allowed to touch.
+ */
+class RecordingDelegationTracker extends DelegationTracker {
+  readonly starts: string[] = [];
+  readonly finishes: { fingerprint: string; completion: DelegationCompletion }[] = [];
+  readonly cancels: string[] = [];
+  readonly failedStarts: { fingerprint: string; reason: string }[] = [];
+
+  override async start(
+    reservation: DelegationReservation,
+  ): Promise<DelegationStartResult> {
+    const outcome = await super.start(reservation);
+    if (outcome.allowed) {
+      this.starts.push(reservation.fingerprint);
+    } else {
+      this.failedStarts.push({ fingerprint: reservation.fingerprint, reason: outcome.reason });
+    }
+    return outcome;
+  }
+
+  override async finish(attempt: DelegationAttempt): Promise<DelegationCompletion> {
+    const completion = await super.finish(attempt);
+    this.finishes.push({ fingerprint: attempt.fingerprint, completion });
+    return completion;
+  }
+
+  override cancel(item: DelegationReservation): void {
+    this.cancels.push(item.fingerprint);
+    super.cancel(item);
+  }
 }
 
 describe("role permission boundaries", () => {
@@ -1069,6 +1108,237 @@ describe("sidekick corrective continuation", () => {
     expect(firstParsed.status).toBe("blocked");
     expect(secondParsed.status).toBe("complete");
     expect(secondParsed.summary).toBe("ok");
+  });
+
+  test("duplicate continuation does not create artificial ambiguity", async () => {
+    let workspaceState = "baseline";
+    let releaseFirst: (() => void) | undefined;
+    const firstRunning = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const tracker = new RecordingDelegationTracker({
+      workspaceState: { read: async () => workspaceState },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      maxConcurrency: 2,
+      run: async (task, context) => {
+        if (task === "first") {
+          await firstRunning;
+          // The first continuation changes the workspace so it must receive
+          // deterministic madeProgress === true, not undefined.
+          workspaceState = "changed-by-first";
+        } else {
+          // The second continuation is the duplicate; it must never run.
+          throw new Error("duplicate continuation must not launch");
+        }
+        return result("partial", context.sessionId ?? "s", "done");
+      },
+    });
+
+    const first = delegate.execute(
+      { task: "first", sessionId: "sidekick-abc" },
+      executionContext("delegate"),
+    );
+    // Ensure the first continuation has reserved + started before the duplicate.
+    await Bun.sleep(10);
+    const second = delegate.execute(
+      { task: "second", sessionId: "sidekick-abc" },
+      executionContext("delegate"),
+    );
+    // Wait until the duplicate has been dispatched (and blocked) while first runs.
+    await Bun.sleep(20);
+    releaseFirst?.();
+    const [firstResult, secondResult] = await Promise.all([first, second]);
+
+    const firstParsed = JSON.parse((firstResult as { text: string }).text) as SidekickResult;
+    const secondParsed = JSON.parse((secondResult as { text: string }).text) as SidekickResult;
+
+    // The duplicate is blocked with the canonical message and never started.
+    expect(secondParsed).toMatchObject({
+      status: "blocked",
+      summary: "Continuation blocked: this sidekick session is already active.",
+      sessionId: "unavailable",
+    });
+    // The first execution's progress attribution is deterministic, not undefined.
+    expect(tracker.finishes[0]?.completion).toEqual({ madeProgress: true, noProgressAttempts: 0 });
+    expect(firstParsed.summary).not.toContain("No workspace progress detected");
+    // Only one execution was ever registered as started.
+    expect(tracker.starts.length).toBe(1);
+  });
+
+  test("no workspace read for blocked continuation", async () => {
+    let reads = 0;
+    let releaseFirst: (() => void) | undefined;
+    const firstRunning = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const tracker = new RecordingDelegationTracker({
+      workspaceState: { read: async () => { reads += 1; return "same"; } },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      maxConcurrency: 2,
+      run: async (task, context) => {
+        if (task === "first") {
+          await firstRunning;
+        } else {
+          throw new Error("duplicate continuation must not launch");
+        }
+        return result("partial", context.sessionId ?? "s", "done");
+      },
+    });
+
+    const first = delegate.execute(
+      { task: "first", sessionId: "sidekick-abc" },
+      executionContext("delegate"),
+    );
+    await Bun.sleep(10);
+    const firstReads = reads;
+    expect(firstReads).toBe(1);
+
+    const second = delegate.execute(
+      { task: "second", sessionId: "sidekick-abc" },
+      executionContext("delegate"),
+    );
+    // Let the duplicate be dispatched and blocked while the first is still
+    // running. The blocked duplicate must not trigger a workspace baseline read.
+    await Bun.sleep(20);
+    expect(reads).toBe(firstReads);
+
+    releaseFirst?.();
+    await Promise.all([first, second]);
+
+    expect(tracker.starts.length).toBe(1);
+    expect(tracker.failedStarts.length).toBe(0);
+  });
+
+  test("no attempt consumed", async () => {
+    let calls = 0;
+    let releaseFirst: (() => void) | undefined;
+    const firstRunning = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const tracker = new RecordingDelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      maxConcurrency: 2,
+      run: async (task, context) => {
+        calls += 1;
+        if (task === "second") throw new Error("duplicate continuation must not launch");
+        if (task === "first") await firstRunning;
+        return result("partial", context.sessionId ?? "s", "no progress");
+      },
+    });
+
+    const first = delegate.execute(
+      { task: "first", sessionId: "sidekick-abc" },
+      executionContext("delegate"),
+    );
+    await Bun.sleep(10);
+    const second = delegate.execute(
+      { task: "second", sessionId: "sidekick-abc" },
+      executionContext("delegate"),
+    );
+    await Bun.sleep(20);
+    releaseFirst?.();
+    await Promise.all([first, second]);
+
+    // The duplicate consumed no attempt: the same session can continue later
+    // and is neither wedged as active nor budget-exhausted prematurely.
+    const later = await execute(
+      delegate,
+      { task: "later", sessionId: "sidekick-abc" },
+      undefined,
+      2,
+    );
+    const laterParsed = JSON.parse((later as { text: string }).text) as SidekickResult;
+    expect(laterParsed.status).toBe("partial");
+    expect(JSON.stringify(later)).not.toContain("already active");
+    expect(JSON.stringify(later)).not.toContain("already been attempted");
+    expect(calls).toBe(2);
+    // First consumed attempt 1 with no progress; the later one is attempt 2.
+    expect(tracker.finishes.filter((f) => f.completion.madeProgress === false).length).toBe(2);
+  });
+
+  test("start rejection releases lock", async () => {
+    let calls = 0;
+    let state = "unchanged";
+    const delegate = createDelegateTool({
+      tracker: new DelegationTracker({ workspaceState: { read: async () => state } }),
+      run: async (_task, context) => {
+        calls += 1;
+        return result("partial", context.sessionId ?? "s", "no progress");
+      },
+    });
+
+    // Exhaust the no-progress retry budget so the next start() is rejected.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await execute(
+        delegate,
+        { task: "Fix auth tests", sessionId: "sidekick-abc" },
+        undefined,
+        attempt + 1,
+      );
+    }
+    const blocked = await execute(
+      delegate,
+      { task: "Fix auth tests", sessionId: "sidekick-abc" },
+      undefined,
+      4,
+    );
+    expect(JSON.stringify(blocked)).toContain("already been attempted 3 times");
+
+    // Genuine workspace progress resets the budget; the same session must not
+    // be blocked as "already active" even though the rejected start() happened
+    // while the continuation lock was held.
+    state = "changed";
+    const resumed = await execute(
+      delegate,
+      { task: "Fix auth tests", sessionId: "sidekick-abc" },
+      undefined,
+      5,
+    );
+    const resumedParsed = JSON.parse((resumed as { text: string }).text) as SidekickResult;
+    expect(resumedParsed.status).toBe("partial");
+    expect(JSON.stringify(resumed)).toContain("(1/3)");
+    expect(JSON.stringify(resumed)).not.toContain("already active");
+    expect(calls).toBe(4);
+  });
+
+  test("cancellation releases session lock", async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const tracker = new RecordingDelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        calls += 1;
+        await Bun.sleep(20);
+        return result("partial", context.sessionId ?? "s", "done");
+      },
+    });
+
+    const cancelled = execute(
+      delegate,
+      { task: "fix it", sessionId: "sidekick-abc" },
+      controller.signal,
+      1,
+    );
+    await Bun.sleep(5);
+    controller.abort();
+    await cancelled;
+
+    // The cancelled continuation released both the session lock and the tracker
+    // execution, so a later continuation of the same session is allowed.
+    const later = await execute(
+      delegate,
+      { task: "fix it again", sessionId: "sidekick-abc" },
+      undefined,
+      2,
+    );
+    const laterParsed = JSON.parse((later as { text: string }).text) as SidekickResult;
+    expect(laterParsed.status).toBe("partial");
+    expect(JSON.stringify(later)).not.toContain("already active");
+    expect(calls).toBe(2);
   });
 });
 

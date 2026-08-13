@@ -357,31 +357,40 @@ async function runBounded(
         };
         continue;
       }
-      const started = await tracker.start(item.reservation);
-      if (!started.allowed) {
-        results[item.index] = blockedResult(
-          started.reason,
-          started.noProgressAttempts,
-          tracker.retryLimit(),
-        );
-        continue;
+      // Acquire the continuation session lock BEFORE tracker.start(). A second
+      // concurrent continuation of the same session must be rejected without
+      // registering a second overlapping execution, which would otherwise mark
+      // the running execution's progress attribution ambiguous.
+      if (invocation.mode === "continue") {
+        if (activeSessionIds.has(invocation.sessionId)) {
+          // Release the reservation this duplicate acquired in reserve(), but
+          // never touch activeExecutions/ambiguousExecutions: no execution was
+          // started for it, so no workspace baseline was read.
+          tracker.cancel(item.reservation);
+          results[item.index] = blockedResult(
+            "session_active",
+            0,
+            tracker.retryLimit(),
+          );
+          continue;
+        }
+        activeSessionIds.add(invocation.sessionId);
       }
-      const attempt = started.attempt;
-      // Reject a second concurrent continuation of the same sidekick session.
-      // The tracker reservation is released so later turns are not wedged.
-      if (invocation.mode === "continue" && activeSessionIds.has(invocation.sessionId)) {
-        tracker.cancel(attempt);
-        results[item.index] = blockedResult(
-          "session_active",
-          0,
-          tracker.retryLimit(),
-        );
-        continue;
-      }
-      if (invocation.mode === "continue") activeSessionIds.add(invocation.sessionId);
-      // The lock must be released on every exit path: success, failure, throw,
-      // or cancellation. A single try/finally owns the continuation lifetime.
+      // One clear owner for the acquired continuation lock. The finally releases
+      // it on every exit path: retry-budget rejection from tracker.start(),
+      // success, partial results, provider failure, runner throw, tracker.finish()
+      // throw, event callback throw, and manager cancellation.
       try {
+        const started = await tracker.start(item.reservation);
+        if (!started.allowed) {
+          results[item.index] = blockedResult(
+            started.reason,
+            started.noProgressAttempts,
+            tracker.retryLimit(),
+          );
+          continue;
+        }
+        const attempt = started.attempt;
         await onEvent?.({
           type: "delegation_started",
           index: item.index,
@@ -435,7 +444,9 @@ async function runBounded(
           model: presentation?.model,
         });
       } finally {
-        if (invocation.mode === "continue") activeSessionIds.delete(invocation.sessionId);
+        if (invocation.mode === "continue") {
+          activeSessionIds.delete(invocation.sessionId);
+        }
       }
     }
   };
