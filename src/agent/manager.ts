@@ -90,7 +90,10 @@ export function createManagerTools(
       stream: options.sidekickStream,
       run: options.sidekickRun,
       systemPrompt: options.sidekickSystemPrompt,
-      runConfig: options.sidekickRunConfig,
+      runConfig: {
+        ...options.sidekickRunConfig,
+        ...(options.config.context ? { context: options.config.context } : {}),
+      },
       managerRole: options.config.manager,
       ...(options.sidekickAuthKey !== undefined
         ? { authKey: options.sidekickAuthKey }
@@ -195,6 +198,7 @@ export async function runManager(
       ...options.runConfig,
       ...commandCodeCredentials(options.config.manager.provider, process.env, options.authKey),
       thinking: options.config.manager.thinking,
+      ...(options.config.context ? { context: options.config.context } : {}),
     },
     stream: options.stream,
     signal: options.signal,

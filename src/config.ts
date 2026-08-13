@@ -23,11 +23,19 @@ export interface MemoryConfig {
   auto: boolean;
 }
 
+/** Bounded provider input context, leaving room for responses and tool calls. */
+export interface ContextConfig {
+  maxTokens: number;
+  reserveTokens: number;
+}
+
 export interface AgentConfig {
   dataDir: string;
   manager: RoleConfig;
   sidekick: RoleConfig;
   memory: MemoryConfig;
+  /** Optional in the public type for compatibility with programmatic callers. */
+  context?: ContextConfig;
 }
 
 export interface LoadConfigOptions {
@@ -198,6 +206,23 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     auto: typeof auto === "boolean" ? auto : true,
   };
 
+  const contextRaw = isObject(raw.context) ? raw.context : {};
+  const maxTokens = contextRaw.maxTokens;
+  const reserveTokens = contextRaw.reserveTokens;
+  if (!Number.isInteger(maxTokens) || (maxTokens as number) <= 0) {
+    issues.push("context.maxTokens must be a positive integer");
+  }
+  if (!Number.isInteger(reserveTokens) || (reserveTokens as number) < 0) {
+    issues.push("context.reserveTokens must be a non-negative integer");
+  }
+  const contextConfig: ContextConfig = {
+    maxTokens: typeof maxTokens === "number" ? maxTokens : 32_000,
+    reserveTokens: typeof reserveTokens === "number" ? reserveTokens : 8_000,
+  };
+  if (contextConfig.reserveTokens >= contextConfig.maxTokens) {
+    issues.push("context.reserveTokens must be less than context.maxTokens");
+  }
+
   if (issues.length > 0) throw new ConfigValidationError(issues);
 
   // Global-provider inheritance: a role with an empty provider uses the other
@@ -227,6 +252,7 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     manager: managerConfig,
     sidekick: sidekickConfig,
     memory: memoryConfig,
+    context: contextConfig,
   };
 }
 
@@ -255,6 +281,7 @@ export function defaultConfig(options: LoadConfigOptions = {}): AgentConfig {
     manager: { provider: "", model: "", thinking: "medium" },
     sidekick: { provider: "", model: "", thinking: "medium" },
     memory: { auto: true },
+    context: { maxTokens: 32_000, reserveTokens: 8_000 },
   };
 }
 
@@ -283,6 +310,7 @@ export async function loadConfig(
         manager: defaults.manager,
         sidekick: defaults.sidekick,
         memory: defaults.memory,
+        context: defaults.context,
       },
       globalLayer,
     ),

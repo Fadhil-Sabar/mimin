@@ -250,4 +250,22 @@ describe("layered config", () => {
     const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
     expect(config.sidekick.model).toBe("gpt-5.5");
   });
+
+  test("context token budgets merge and validate", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(home, ".mimin", "config.json"), {
+      ...roles, context: { maxTokens: 40_000, reserveTokens: 8_000 },
+    });
+    await writeJson(join(project, ".mimin", "config.json"), {
+      context: { reserveTokens: 6_000 },
+    });
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(config.context).toEqual({ maxTokens: 40_000, reserveTokens: 6_000 });
+
+    await writeJson(join(project, ".mimin", "config.json"), {
+      ...roles, context: { maxTokens: 100, reserveTokens: 100 },
+    });
+    await expect(loadConfig({ cwd: project, homeDir: home, env: {} }))
+      .rejects.toBeInstanceOf(ConfigValidationError);
+  });
 });

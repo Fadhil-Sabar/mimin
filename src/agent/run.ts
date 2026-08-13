@@ -25,6 +25,7 @@ import type {
   ToolExecutionResult,
   ToolExecutionValue,
 } from "./types.js";
+import { buildContext, type ContextDiagnostics } from "../context/context.js";
 
 export type AgentStreamFactory = (
   model: Model<Api>,
@@ -43,6 +44,7 @@ export interface RunAgentResult {
   finalMessage?: AssistantMessage;
   stopReason?: StopReason;
   error?: string;
+  contextDiagnostics?: ContextDiagnostics;
 }
 
 export interface RunAgentOptions<TApi extends Api = Api> {
@@ -109,6 +111,7 @@ function streamOptionsFromConfig(
 
   const {
     thinking: _thinking,
+    context: _context,
     ...providerOptions
   } = config;
   return {
@@ -168,6 +171,7 @@ export async function runAgent<TApi extends Api = Api>(
   let toolCalls = 0;
   let finalMessage: AssistantMessage | undefined;
   let lastStopReason: StopReason | undefined;
+  let contextDiagnostics: ContextDiagnostics | undefined;
 
   const finish = (
     status: AgentTerminalStatus,
@@ -179,6 +183,7 @@ export async function runAgent<TApi extends Api = Api>(
     messages,
     finalMessage,
     stopReason: lastStopReason,
+    ...(contextDiagnostics ? { contextDiagnostics } : {}),
     ...extra,
   });
 
@@ -188,11 +193,19 @@ export async function runAgent<TApi extends Api = Api>(
     }
 
     turns += 1;
+    const contextMessages = config?.context
+      ? buildContext(messages, {
+        ...config.context,
+        modelContextWindow: options.model.contextWindow,
+        systemPrompt: options.systemPrompt,
+      })
+      : undefined;
+    contextDiagnostics = contextMessages?.diagnostics;
     const context: Context = {
       ...(options.systemPrompt === undefined
         ? {}
         : { systemPrompt: options.systemPrompt }),
-      messages,
+      messages: contextMessages?.messages ?? messages,
       tools: definitions,
     };
 

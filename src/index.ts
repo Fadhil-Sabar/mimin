@@ -1,10 +1,14 @@
 export { loadConfig, defaultConfig, ConfigValidationError } from "./config.js";
 export type {
   AgentConfig,
+  ContextConfig,
   LoadConfigOptions,
   RoleConfig,
   ThinkingSetting,
 } from "./config.js";
+
+export { buildContext, estimateMessageTokens, estimateMessagesTokens, usableContextTokens } from "./context/context.js";
+export type { CompactedContext, ContextBudget, ContextDiagnostics } from "./context/context.js";
 
 export { runAgent } from "./agent/run.js";
 export type {

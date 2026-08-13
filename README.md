@@ -56,12 +56,15 @@ Nested role objects merge, so a project can override only its manager model or t
 ```json
 {
   "dataDir": "~/.mimin/data",
+  "context": { "maxTokens": 32000, "reserveTokens": 8000 },
   "manager": { "provider": "anthropic", "model": "claude-sonnet-4-6", "thinking": "medium" },
   "sidekick": { "model": "claude-sonnet-4-6", "thinking": "low" }
 }
 ```
 
 The sidekick above inherits the manager's provider (`anthropic`); only one provider is configured.
+
+Long-running sessions retain their complete append-only JSONL history, but model calls use a bounded context. `context.maxTokens` is the maximum model window mimin may use and `reserveTokens` leaves response and tool-call headroom. The defaults are 32000 and 8000. When pi-ai reports a smaller model context window, mimin uses the smaller limit. Older provider context is replaced by a deterministic local summary while recent messages and complete tool-call/result groups remain verbatim.
 
 The current working directory is always the workspace and determines project-memory identity.
 

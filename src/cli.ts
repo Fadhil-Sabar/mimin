@@ -26,7 +26,7 @@ import { suggestProviders, suggestProvidersWithAuth } from "./tui/provider-sugge
 import { credentialAvailable } from "./tui/provider-suggestions.js";
 import type { ProviderSuggestionSource } from "./tui/provider-suggestions.js";
 
-export const CLI_VERSION = "0.3.2";
+export const CLI_VERSION = "0.4.0";
 
 export type ParsedCliArguments =
   | { mode: "help" }

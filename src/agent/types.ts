@@ -8,6 +8,7 @@ import type {
   ToolCall,
   TSchema,
 } from "@mariozechner/pi-ai";
+import type { ContextBudget } from "../context/context.js";
 
 /** A value returned by an injected tool after it has finished executing. */
 export interface ToolExecutionResult {
@@ -91,6 +92,8 @@ export type AgentEventCallback = (
 
 /** Common model-side configuration understood by the generic loop. */
 export interface AgentRunConfig {
+  /** Provider-facing input-context budget. Never sent as a provider option. */
+  context?: ContextBudget;
   /** Provider/model stream options are passed through without reinterpretation. */
   temperature?: number;
   maxTokens?: number;

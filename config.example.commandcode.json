@@ -1,4 +1,8 @@
 {
+  "context": {
+    "maxTokens": 32000,
+    "reserveTokens": 8000
+  },
   "dataDir": "~/.mimin/data",
   "manager": {
     "provider": "commandcode",
