@@ -964,6 +964,112 @@ describe("sidekick corrective continuation", () => {
     const parsed = [r1, r2].map((r) => JSON.parse((r as { text: string }).text) as SidekickResult);
     expect(parsed.every((p) => p.status === "complete")).toBe(true);
   });
+
+  test("continuation receives only its own history, not the manager or other sidekicks", async () => {
+    const { workspace, dataDir } = await fixture();
+    const store = new SessionStore({ root: join(dataDir, "sessions") });
+
+    const manager = await store.createSession("manager");
+    await manager.append({ role: "user", content: "manager secret intent", timestamp: 1 });
+
+    const sidekickA = await store.createSession("sidekick");
+    await sidekickA.append({ role: "user", content: "Implement auth refresh", timestamp: 2 });
+    await sidekickA.append(assistant([{ type: "text", text: "auth work" }]));
+
+    const sidekickB = await store.createSession("sidekick");
+    await sidekickB.append({ role: "user", content: "Implement billing", timestamp: 4 });
+    await sidekickB.append(assistant([{ type: "text", text: "billing transcript" }]));
+
+    let seenMessages: unknown[] = [];
+    const stream = (_model: Model<Api>, context: Context) => {
+      seenMessages = structuredClone(context.messages);
+      return completedStream(
+        assistant([{ type: "text", text: JSON.stringify({
+          status: "complete",
+          summary: "corrected",
+          filesChanged: [],
+          verification: [],
+        }) }]),
+      );
+    };
+
+    await runSidekick({
+      task: "Fix the failing refresh-token test",
+      workspace,
+      config: config(dataDir).sidekick,
+      sessionStore: store,
+      sessionId: sidekickA.id,
+      model,
+      stream,
+    });
+
+    const serialized = JSON.stringify(seenMessages);
+    expect(serialized).toContain("Implement auth refresh");
+    expect(serialized).toContain("Fix the failing refresh-token test");
+    expect(serialized).toContain("auth work");
+    expect(serialized).not.toContain("manager secret intent");
+    expect(serialized).not.toContain("Implement billing");
+    expect(serialized).not.toContain("billing transcript");
+  });
+
+  test("continued delegation still obeys the no-progress retry budget", async () => {
+    let launches = 0;
+    const tracker = new DelegationTracker({
+      workspaceState: { read: async () => "unchanged" },
+    });
+    const delegate = createDelegateTool({
+      tracker,
+      run: async (_task, context) => {
+        launches += 1;
+        return result("partial", context.sessionId ?? "s", "no progress");
+      },
+    });
+
+    let last: string = "";
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const output = await execute(
+        delegate,
+        { task: "Fix refresh test", sessionId: "sidekick-abc" },
+        undefined,
+        attempt + 1,
+      );
+      last = JSON.stringify(output);
+    }
+
+    expect(launches).toBe(3);
+    expect(last).toContain("already been attempted 3 times");
+    expect(last).not.toContain("already active");
+  });
+
+  test("a failed continuation releases the session lock for a later retry", async () => {
+    let calls = 0;
+    const delegate = createDelegateTool({
+      run: async (_task, context) => {
+        calls += 1;
+        if (calls === 1) throw new Error("provider failed");
+        return result("complete", context.sessionId ?? "s", "ok");
+      },
+    });
+
+    const first = await execute(
+      delegate,
+      { task: "fix it", sessionId: "sidekick-abc" },
+      undefined,
+      1,
+    );
+    const second = await execute(
+      delegate,
+      { task: "fix it again", sessionId: "sidekick-abc" },
+      undefined,
+      2,
+    );
+
+    const firstParsed = JSON.parse((first as { text: string }).text) as SidekickResult;
+    const secondParsed = JSON.parse((second as { text: string }).text) as SidekickResult;
+    expect(firstParsed.status).toBe("blocked");
+    expect(secondParsed.status).toBe("complete");
+    expect(secondParsed.summary).toBe("ok");
+  });
 });
 
 describe("dispatch-time workspace progress tracking", () => {

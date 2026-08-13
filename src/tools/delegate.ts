@@ -379,61 +379,64 @@ async function runBounded(
         continue;
       }
       if (invocation.mode === "continue") activeSessionIds.add(invocation.sessionId);
-      await onEvent?.({
-        type: "delegation_started",
-        index: item.index,
-        taskCount,
-        task,
-        model: presentation?.model,
-      });
-      let result: SidekickResult;
+      // The lock must be released on every exit path: success, failure, throw,
+      // or cancellation. A single try/finally owns the continuation lifetime.
       try {
-        result = managerFacingResult(
-          await runner(task, {
-            index: item.index,
-            signal,
-            onActivity: (activity) =>
-              onEvent?.({
-                type: "sidekick_activity",
-                index: item.index,
-                taskCount,
-                activity,
-              }),
-            ...(invocation.mode === "continue"
-              ? { sessionId: invocation.sessionId }
-              : {}),
-          }),
-        );
-      } catch (error) {
-        result = failedResult(error);
-      }
-
-      if (signal?.aborted) {
-        // Cancellation is not evidence that an otherwise retryable task made
-        // no progress. Release its reservation without consuming budget.
-        tracker.cancel(attempt);
-      } else {
-        const completion = await tracker.finish(attempt);
-        if (completion.madeProgress === false) {
-          result = withProgressFeedback(
-            result,
-            completion.noProgressAttempts,
-            tracker.retryLimit(),
+        await onEvent?.({
+          type: "delegation_started",
+          index: item.index,
+          taskCount,
+          task,
+          model: presentation?.model,
+        });
+        let result: SidekickResult;
+        try {
+          result = managerFacingResult(
+            await runner(task, {
+              index: item.index,
+              signal,
+              onActivity: (activity) =>
+                onEvent?.({
+                  type: "sidekick_activity",
+                  index: item.index,
+                  taskCount,
+                  activity,
+                }),
+              ...(invocation.mode === "continue"
+                ? { sessionId: invocation.sessionId }
+                : {}),
+            }),
           );
+        } catch (error) {
+          result = failedResult(error);
         }
+
+        if (signal?.aborted) {
+          // Cancellation is not evidence that an otherwise retryable task made
+          // no progress. Release its reservation without consuming budget.
+          tracker.cancel(attempt);
+        } else {
+          const completion = await tracker.finish(attempt);
+          if (completion.madeProgress === false) {
+            result = withProgressFeedback(
+              result,
+              completion.noProgressAttempts,
+              tracker.retryLimit(),
+            );
+          }
+        }
+        results[item.index] = result;
+        await onEvent?.({
+          type: "delegation_finished",
+          index: item.index,
+          taskCount,
+          result,
+          task,
+          model: presentation?.model,
+        });
+      } finally {
+        if (invocation.mode === "continue") activeSessionIds.delete(invocation.sessionId);
       }
-      results[item.index] = result;
-      // Continuations must never hold the session lock past the finish event,
-      // including when the tracker.finish path above rejects or throws.
-      if (invocation.mode === "continue") activeSessionIds.delete(invocation.sessionId);
-      await onEvent?.({
-        type: "delegation_finished",
-        index: item.index,
-        taskCount,
-        result,
-        task,
-        model: presentation?.model,
-      });
     }
   };
 
