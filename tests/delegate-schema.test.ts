@@ -314,6 +314,63 @@ describe("delegate contract rejection", () => {
   });
 });
 
+describe("delegate continuation acceptance and validation", () => {
+  test("single { task: string, sessionId: string } passes generic validation", () => {
+    const delegate = createDelegateTool({
+      run: async (task) => result("complete", task),
+    });
+    expect(() =>
+      validatePath(delegate, { task: "fix it", sessionId: "sidekick-abc" }),
+    ).not.toThrow();
+  });
+
+  test("continuation with a task batch is rejected at runtime", async () => {
+    const delegate = createDelegateTool({
+      run: async (task) => result("complete", task),
+    });
+    const output = await execute(delegate, {
+      task: ["a", "b"],
+      sessionId: "sidekick-abc",
+    });
+    expect((output as { isError: boolean }).isError).toBe(true);
+    expect((output as { text: string }).text).toContain("task batch");
+  });
+
+  test("continuation requires a single task", async () => {
+    const delegate = createDelegateTool({
+      run: async (task) => result("complete", task),
+    });
+    const output = await execute(delegate, { sessionId: "sidekick-abc" });
+    expect((output as { isError: boolean }).isError).toBe(true);
+    expect((output as { text: string }).text).toContain("single task");
+  });
+
+  test("malformed session ids are rejected before any sidekick runs", async () => {
+    let launches = 0;
+    const delegate = createDelegateTool({
+      run: async (task) => {
+        launches += 1;
+        return result("complete", task);
+      },
+    });
+    for (const id of ["../manager/x", "a/b", "", "..", "side kick"]) {
+      const output = await execute(delegate, { task: "fix it", sessionId: id });
+      expect((output as { isError: boolean }).isError).toBe(true);
+    }
+    expect(launches).toBe(0);
+  });
+
+  test("schema serializes a sessionId string property", () => {
+    const delegate = createDelegateTool({
+      run: async (task) => result("complete", task),
+    });
+    const serialized = JSON.parse(JSON.stringify(delegate.parameters)) as Record<string, unknown>;
+    const props = serialized.properties as Record<string, unknown>;
+    expect(props.sessionId).toBeDefined();
+    expect((props.sessionId as Record<string, unknown>).type).toBe("string");
+  });
+});
+
 describe("delegate event presentation metadata", () => {
   test("delegation_started and delegation_finished carry task and model", async () => {
     const events: Array<Record<string, unknown>> = [];

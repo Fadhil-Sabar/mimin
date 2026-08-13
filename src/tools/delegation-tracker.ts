@@ -241,15 +241,20 @@ export class DelegationTracker {
     this.maxNoProgressAttempts = Number.isFinite(configured) ? Math.max(1, Math.floor(configured as number)) : MAX_NO_PROGRESS_DELEGATION_ATTEMPTS;
   }
 
-  reserve(task: string, turn?: number): DelegationReserveResult {
-    const fingerprint = normalizeDelegationTask(task);
-    const state = this.states.get(fingerprint) ?? { attempts: 0, noProgressAttempts: 0, active: false };
-    this.states.set(fingerprint, state);
+  reserve(
+    task: string,
+    turn?: number,
+    /** Optional explicit identity. Continuations pass `sessionId + task`. */
+    fingerprint?: string,
+  ): DelegationReserveResult {
+    const key = fingerprint ?? normalizeDelegationTask(task);
+    const state = this.states.get(key) ?? { attempts: 0, noProgressAttempts: 0, active: false };
+    this.states.set(key, state);
     if (turn !== undefined && state.lastTurn === turn) return { allowed: false, reason: "duplicate_turn", noProgressAttempts: state.noProgressAttempts };
     if (state.active) return { allowed: false, reason: "duplicate_active", noProgressAttempts: state.noProgressAttempts };
     state.active = true;
     state.lastTurn = turn;
-    return { allowed: true, reservation: { fingerprint, task } };
+    return { allowed: true, reservation: { fingerprint: key, task } };
   }
 
   async start(reservation: DelegationReservation): Promise<DelegationStartResult> {

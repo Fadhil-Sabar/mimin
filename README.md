@@ -92,6 +92,14 @@ During an interactive run, Escape cancels the active manager request (including 
 
 Manager delegation is protected against redundant corrective loops within a single run. Equivalent active tasks are skipped, and the fourth equivalent delegation with no Git-observed workspace progress is blocked after three attempts. Meaningful workspace changes reset that no-progress budget. This is not a manager turn limit, so legitimate long tasks remain unbounded.
 
+Since v0.3.2 the manager can **continue** an existing sidekick session for focused corrective work instead of always starting a fresh sidekick. A prior compact sidekick result carries a `sessionId`; the manager may pass that id back to `delegate`:
+
+```json
+{ "task": "Fix the failing refresh-token test", "sessionId": "sidekick-<id>" }
+```
+
+The continued sidekick receives only its own prior session history plus the new correction. It never receives the manager transcript, another sidekick's history, memory/session search output, or current manager context. Continuation is validated through `SessionStore`: it must resolve to a real **sidekick** session in the current data store, and a manager session id, unknown id, malformed id, or arbitrary path is rejected with a compact manager-facing error. The same sidekick session cannot be continued concurrently (the second active continuation is blocked and the lock is always released on success, failure, error, or cancellation), and continuations still pass through the existing duplicate/no-progress delegation tracker, fingerprinted by session identity plus task so the same correction across distinct sessions remains valid.
+
 ### Interactive commands
 
 Slash commands are intercepted in interactive mode before any model call. Typing `/` opens an autocomplete menu; Tab applies a completion, arrow keys move the selection, and Enter confirms.
@@ -203,7 +211,7 @@ It defaults to `true` (safe because learning is limited to user-authored content
 | Search compact session history | yes | no |
 | Verification | fixed actions only | via bounded bash |
 
-Manager verification accepts only git status, git diff, `bun test`, configured `typecheck` and `build` package scripts, or the combined test+typecheck+build action. Commands, arguments, and working directories cannot be supplied by the model. The manager reads delegated files, verifies work, and can re-delegate focused corrections. Every delegation creates a fresh sidekick JSONL session containing only its self-contained task; complete manager and sidekick histories remain role-isolated for provider continuation and are never merged. Delegation results and TUI activity are compact whitelists, while `session_search` searches only user messages and assistant text blocks. Reasoning and tool logs never cross through delegation, the TUI, or `session_search`.
+Manager verification accepts only git status, git diff, `bun test`, configured `typecheck` and `build` package scripts, or the combined test+typecheck+build action. Commands, arguments, and working directories cannot be supplied by the model. The manager reads delegated files, verifies work, and can re-delegate focused corrections. A fresh delegation creates a sidekick JSONL session containing only its self-contained task; a continuation appends the correction to that same sidekick session. Complete manager and sidekick histories remain role-isolated for provider continuation and are never merged. Delegation results and TUI activity are compact whitelists, while `session_search` searches only user messages and assistant text blocks. Reasoning and tool logs never cross through delegation, the TUI, or `session_search`.
 
 ## Storage
 

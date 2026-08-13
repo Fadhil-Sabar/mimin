@@ -126,6 +126,18 @@ async function readLines(pathname: string): Promise<SessionLine[]> {
   return lines.map((line) => parseLine(JSON.parse(line) as unknown));
 }
 
+async function fileExists(pathname: string): Promise<boolean> {
+  try {
+    await open(pathname, "r");
+    return true;
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
 /** An append-only JSONL conversation with independent role-scoped identity. */
 export class JsonlSession implements AgentMessageSession {
   readonly messages: Message[];
@@ -238,6 +250,16 @@ export class SessionStore {
   async loadSession(role: SessionRole, id: string): Promise<JsonlSession> {
     assertRole(role);
     const pathname = sessionPath(this.root, role, id);
+    // A wrong-role session id must read as a role mismatch, never as a missing
+    // file. This keeps continuation errors compact and manager-facing.
+    if (!(await fileExists(pathname))) {
+      if (role === "sidekick" && (await fileExists(sessionPath(this.root, "manager", id)))) {
+        throw new Error("Session is not a sidekick session");
+      }
+      if (role === "manager" && (await fileExists(sessionPath(this.root, "sidekick", id)))) {
+        throw new Error("Session is not a manager session");
+      }
+    }
     const lines = await readLines(pathname);
     const metadata = lines.find(
       (line): line is SessionMetadataLine => line.type === "session",

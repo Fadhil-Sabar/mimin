@@ -86,6 +86,12 @@ export interface RunSidekickOptions {
   /** When omitted, SessionStore uses its environment-based default root. */
   dataDir?: string;
   sessionStore?: SessionStore;
+  /**
+   * Continue this existing sidekick session instead of creating a fresh one.
+   * The session must already exist in the store as a sidekick session; the
+   * manager, other sidekicks, and workspace history are never merged in.
+   */
+  sessionId?: string;
   model?: Model<Api>;
   modelResolver?: ModelResolver;
   stream?: AgentStreamFactory;
@@ -282,6 +288,9 @@ function toolCallDetail(name: string, arguments_: Record<string, unknown>): stri
   return undefined;
 }
 
+export const SIDEKICK_CONTINUATION_SYSTEM_NOTE =
+  "You are continuing your previous task context, but the workspace may have changed since your last turn. Re-read relevant files before making corrective edits when necessary.";
+
 /** Run one isolated implementation conversation using the generic agent loop. */
 export async function runSidekick(
   options: RunSidekickOptions,
@@ -293,7 +302,9 @@ export async function runSidekick(
     new SessionStore(
       options.dataDir ? { root: join(options.dataDir, "sessions") } : {},
     );
-  const session = await store.createSession("sidekick");
+  const session = options.sessionId
+    ? await store.loadSession("sidekick", options.sessionId)
+    : await store.createSession("sidekick");
   const observedFiles: string[] = [];
 
   const activity = async (event: SidekickActivityEvent): Promise<void> => {
@@ -319,9 +330,13 @@ export async function runSidekick(
       options.model ??
       modelFromRole(options.config, options.modelResolver, options.managerRole);
     const run = options.run ?? ((runOptions) => runAgent(runOptions));
+    const baseSystemPrompt = options.systemPrompt ?? sidekickPrompt;
+    const systemPrompt = options.sessionId
+      ? `${baseSystemPrompt}\n\n${SIDEKICK_CONTINUATION_SYSTEM_NOTE}`
+      : baseSystemPrompt;
     runResult = await run({
       model,
-      systemPrompt: options.systemPrompt ?? sidekickPrompt,
+      systemPrompt,
       session,
       tools: createSidekickTools(options.workspace),
       config: {

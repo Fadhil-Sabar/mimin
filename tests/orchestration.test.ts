@@ -751,6 +751,221 @@ describe("manager correction and bounded delegation", () => {
   });
 });
 
+describe("sidekick corrective continuation", () => {
+  test("fresh delegation creates a new session and continuation resumes the same session", async () => {
+    const { workspace, dataDir } = await fixture();
+    const store = new SessionStore({ root: join(dataDir, "sessions") });
+    const stream = (_model: Model<Api>, context: Context) => {
+      const messages = context.messages.map((message) =>
+        message.role === "user" ? String(message.content) : "assistant",
+      );
+      return completedStream(
+        assistant([{ type: "text", text: JSON.stringify({
+          status: "complete",
+          summary: "seen " + messages.length + " messages",
+          filesChanged: [],
+          verification: [],
+        }) }]),
+      );
+    };
+
+    const first = await runSidekick({
+      task: "Implement auth refresh",
+      workspace,
+      config: config(dataDir).sidekick,
+      sessionStore: store,
+      model,
+      stream,
+    });
+    const second = await runSidekick({
+      task: "Fix the failing refresh-token test",
+      workspace,
+      config: config(dataDir).sidekick,
+      sessionStore: store,
+      sessionId: first.sessionId,
+      model,
+      stream,
+    });
+
+    expect(second.sessionId).toBe(first.sessionId);
+    const messages = (await store.loadSession("sidekick", first.sessionId)).messages;
+    // user: task one, assistant, user: correction, assistant.
+    expect(messages.filter((message) => message.role === "user").map((m) => m.content))
+      .toEqual(["Implement auth refresh", "Fix the failing refresh-token test"]);
+    expect(JSON.stringify(messages)).toContain("seen 1 messages");
+    expect(JSON.stringify(messages)).toContain("seen 3 messages");
+  });
+
+  test("continuation rejects a manager session id", async () => {
+    const { workspace, dataDir } = await fixture();
+    const store = new SessionStore({ root: join(dataDir, "sessions") });
+    const manager = await store.createSession("manager");
+    await manager.append({ role: "user", content: "manager history", timestamp: 1 });
+
+    await expect(
+      runSidekick({
+        task: "correct it",
+        workspace,
+        config: config(dataDir).sidekick,
+        sessionStore: store,
+        sessionId: manager.id,
+        model,
+        stream: () => completedStream(assistant([{ type: "text", text: "{}" }])),
+      }),
+    ).rejects.toThrow(/does not match|not a sidekick/i);
+  });
+
+  test("continuation rejects unknown and malformed ids through the store", async () => {
+    const { workspace, dataDir } = await fixture();
+    const store = new SessionStore({ root: join(dataDir, "sessions") });
+
+    await expect(
+      runSidekick({
+        task: "correct it",
+        workspace,
+        config: config(dataDir).sidekick,
+        sessionStore: store,
+        sessionId: "sidekick-does-not-exist",
+        model,
+        stream: () => completedStream(assistant([{ type: "text", text: "{}" }])),
+      }),
+    ).rejects.toThrow(/ENOENT|Session metadata/);
+
+    await expect(
+      runSidekick({
+        task: "correct it",
+        workspace,
+        config: config(dataDir).sidekick,
+        sessionStore: store,
+        sessionId: "../manager/../secrets",
+        model,
+        stream: () => completedStream(assistant([{ type: "text", text: "{}" }])),
+      }),
+    ).rejects.toThrow(/Invalid session id/);
+  });
+
+  test("delegate continuation is blocked for an unknown session with a compact result", async () => {
+    const delegate = createDelegateTool({
+      sidekick: {
+        workspace: "/tmp",
+        config: { provider: "fake-provider", model: "sidekick", thinking: "off" },
+        sessionStore: new SessionStore({ root: "/nonexistent-sessions-root" }),
+      },
+    });
+    const output = await execute(delegate, {
+      task: "fix it",
+      sessionId: "sidekick-missing",
+    });
+    expect(output).toMatchObject({ isError: false });
+    const serialized = JSON.stringify(output);
+    expect(serialized).toContain("blocked");
+    expect(serialized).toContain("not found");
+  });
+
+  test("the same sidekick session cannot be continued concurrently", async () => {
+    const { workspace, dataDir } = await fixture();
+    const store = new SessionStore({ root: join(dataDir, "sessions") });
+    const delegate = createDelegateTool({
+      sidekick: {
+        workspace,
+        config: config(dataDir).sidekick,
+        sessionStore: store,
+      },
+      run: async (_task, context) => {
+        await Bun.sleep(15);
+        return result("partial", context.sessionId ?? "missing", "corrected");
+      },
+    });
+    const output = await execute(delegate, {
+      task: ["first", "second", "third"],
+      sessionId: undefined,
+    });
+    void output;
+
+    // Two continuations of the same stored sidekick session in one batch must
+    // be blocked before the second one can mutate the session concurrently.
+    const first = await runSidekick({
+      task: "seed",
+      workspace,
+      config: config(dataDir).sidekick,
+      sessionStore: store,
+      model,
+      stream: () => completedStream(assistant([{ type: "text", text: JSON.stringify({
+        status: "complete", summary: "seeded", filesChanged: [], verification: [],
+      }) }])),
+    });
+    const continuing = createDelegateTool({
+      sidekick: {
+        workspace,
+        config: config(dataDir).sidekick,
+        sessionStore: store,
+      },
+      maxConcurrency: 2,
+      run: async (_task, context) => {
+        await Bun.sleep(20);
+        return result("complete", context.sessionId ?? first.sessionId, "done");
+      },
+    });
+    // A batch of two continuations of the same session is rejected by the schema
+    // (continuation requires a single task), so drive two single calls raced
+    // through one manager turn instead.
+    const a = continuing.execute({ task: "fix a", sessionId: first.sessionId }, executionContext("delegate"));
+    const b = continuing.execute({ task: "fix b", sessionId: first.sessionId }, executionContext("delegate"));
+    const [ra, rb] = await Promise.all([a, b]);
+    const statuses = [ra, rb].map((r) => {
+      const parsed = JSON.parse((r as { text: string }).text) as SidekickResult;
+      return parsed.status;
+    }).sort();
+    expect(statuses.filter((s) => s === "blocked").length).toBeGreaterThanOrEqual(1);
+  });
+
+  test("different sidekick sessions may still run concurrently", async () => {
+    const { workspace, dataDir } = await fixture();
+    const store = new SessionStore({ root: join(dataDir, "sessions") });
+    const sessions: string[] = [];
+    const delegate = createDelegateTool({
+      sidekick: {
+        workspace,
+        config: config(dataDir).sidekick,
+        sessionStore: store,
+      },
+      maxConcurrency: 3,
+      run: async (_task, context) => {
+        await Bun.sleep(15);
+        return result("complete", context.sessionId ?? "missing", "done");
+      },
+    });
+    const seeds = await runSidekick({
+      task: "seed one",
+      workspace,
+      config: config(dataDir).sidekick,
+      sessionStore: store,
+      model,
+      stream: () => completedStream(assistant([{ type: "text", text: JSON.stringify({
+        status: "complete", summary: "seeded", filesChanged: [], verification: [],
+      }) }])),
+    });
+    sessions.push(seeds.sessionId);
+    const seedTwo = await runSidekick({
+      task: "seed two",
+      workspace,
+      config: config(dataDir).sidekick,
+      sessionStore: store,
+      model,
+      stream: () => completedStream(assistant([{ type: "text", text: JSON.stringify({
+        status: "complete", summary: "seeded", filesChanged: [], verification: [],
+      }) }])),
+    });
+    sessions.push(seedTwo.sessionId);
+
+    const one = delegate.execute({ task: "fix one", sessionId: sessions[0] }, executionContext("delegate"));
+    const two = delegate.execute({ task: "fix two", sessionId: sessions[1] }, executionContext("delegate"));
+    const [r1, r2] = await Promise.all([one, two]);
+    const parsed = [r1, r2].map((r) => JSON.parse((r as { text: string }).text) as SidekickResult);
+    expect(parsed.every((p) => p.status === "complete")).toBe(true);
+  });
+});
+
 describe("dispatch-time workspace progress tracking", () => {
   test("marks every overlapping execution attribution-unknown without changing retry state", async () => {
     let workspaceState = "initial";

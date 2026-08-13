@@ -6,6 +6,7 @@ import type {
 } from "../agent/types.js";
 import {
   DelegationTracker,
+  normalizeDelegationTask,
   type DelegationReservation,
 } from "./delegation-tracker.js";
 import {
@@ -19,12 +20,18 @@ export interface SidekickRunnerContext {
   index: number;
   signal?: AbortSignal;
   onActivity?: (event: SidekickActivityEvent) => void | Promise<void>;
+  /** Present for continuation invocations only. */
+  sessionId?: string;
 }
 
 export type SidekickRunner = (
   task: string,
   context: SidekickRunnerContext,
 ) => Promise<SidekickResult>;
+
+export type SidekickInvocation =
+  | { mode: "fresh"; task: string }
+  | { mode: "continue"; sessionId: string; task: string };
 
 export type DelegateEvent =
   | {
@@ -71,11 +78,12 @@ export interface CreateDelegateToolOptions {
 interface DelegateArguments {
   task?: string | string[];
   tasks?: string[];
+  sessionId?: string;
 }
 
 interface PreparedTask {
   index: number;
-  task: string;
+  invocation: SidekickInvocation;
   reservation: DelegationReservation;
 }
 
@@ -118,6 +126,14 @@ const delegateParameters = Type.Object(
         description: "Alias for an array of independent contracts",
       }),
     ),
+    sessionId: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 128,
+        description:
+          "Continue this existing sidekick session (from a prior delegate result) with a focused corrective task. Omit to create a fresh sidekick session. Only a single task may be continued.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -140,6 +156,33 @@ function resolveTasks(args: DelegateArguments): string[] {
     throw new Error("delegate requires one task or a non-empty task array");
   }
   return tasks;
+}
+
+/** Model-supplied session handles must match the store's id grammar only. */
+function assertSessionId(id: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(id) || id === "." || id === "..") {
+    throw new Error("Invalid sidekick session id");
+  }
+}
+
+/**
+ * Resolve invocations from validated arguments. A continuation (`sessionId`)
+ * requires a single string task and is never mixed with a batch.
+ */
+function resolveInvocations(args: DelegateArguments): SidekickInvocation[] {
+  const hasSessionId = args.sessionId !== undefined;
+  if (!hasSessionId) {
+    return resolveTasks(args).map((task) => ({ mode: "fresh", task }));
+  }
+  if (args.tasks !== undefined || Array.isArray(args.task)) {
+    throw new Error("delegate cannot continue a sidekick session with a task batch");
+  }
+  const task = typeof args.task === "string" ? args.task : undefined;
+  if (!task || !task.trim()) {
+    throw new Error("delegate continuation requires a single task");
+  }
+  assertSessionId(args.sessionId!);
+  return [{ mode: "continue", sessionId: args.sessionId!, task }];
 }
 
 function concurrencyLimit(value: number | undefined): number {
@@ -181,7 +224,11 @@ function failedResult(error: unknown): SidekickResult {
 }
 
 function blockedResult(
-  reason: "duplicate_active" | "duplicate_turn" | "retry_budget_exhausted",
+  reason:
+    | "duplicate_active"
+    | "duplicate_turn"
+    | "retry_budget_exhausted"
+    | "session_active",
   noProgressAttempts: number,
   retryLimit: number,
 ): SidekickResult {
@@ -198,6 +245,15 @@ function blockedResult(
     return {
       status: "blocked",
       summary: "Delegation skipped: an equivalent task was already dispatched in this manager response.",
+      filesChanged: [],
+      verification: [],
+      sessionId: "unavailable",
+    };
+  }
+  if (reason === "session_active") {
+    return {
+      status: "blocked",
+      summary: "Continuation blocked: this sidekick session is already active.",
       filesChanged: [],
       verification: [],
       sessionId: "unavailable",
@@ -228,19 +284,45 @@ function withProgressFeedback(
   };
 }
 
+function continuationBlocked(summary: string): SidekickResult {
+  return {
+    status: "blocked",
+    summary,
+    filesChanged: [],
+    verification: [],
+    sessionId: "unavailable",
+  };
+}
+
 function productionRunner(
   sidekick: CreateDelegateToolOptions["sidekick"],
 ): SidekickRunner {
   if (!sidekick) {
     throw new Error("createDelegateTool requires sidekick options when no runner is injected");
   }
-  return (task, context) =>
-    runSidekick({
-      ...sidekick,
-      task,
-      signal: context.signal,
-      onActivity: context.onActivity,
-    });
+  return async (task, context) => {
+    try {
+      return await runSidekick({
+        ...sidekick,
+        task,
+        signal: context.signal,
+        onActivity: context.onActivity,
+        ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+      });
+    } catch (error) {
+      // Continuation lookup failures must stay compact and manager-facing:
+      // no filesystem paths or raw storage errors cross back to the manager.
+      if (!context.sessionId) throw error;
+      const message = error instanceof Error ? error.message : String(error);
+      if (/invalid session id/i.test(message)) {
+        return continuationBlocked("Continuation blocked: invalid sidekick session id.");
+      }
+      if (/does not match|not a sidekick/i.test(message)) {
+        return continuationBlocked("Continuation blocked: session is not a sidekick session.");
+      }
+      return continuationBlocked("Continuation blocked: sidekick session was not found.");
+    }
+  };
 }
 
 async function runBounded(
@@ -252,6 +334,7 @@ async function runBounded(
   onEvent: DelegateEventCallback | undefined,
   tracker: DelegationTracker,
   results: SidekickResult[],
+  activeSessionIds: Set<string>,
   presentation?: { model?: string },
 ): Promise<void> {
   let nextIndex = 0;
@@ -261,6 +344,8 @@ async function runBounded(
       const item = tasks[nextIndex];
       if (!item) return;
       nextIndex += 1;
+      const invocation = item.invocation;
+      const task = invocation.task;
       if (signal?.aborted) {
         tracker.cancel(item.reservation);
         results[item.index] = {
@@ -282,17 +367,29 @@ async function runBounded(
         continue;
       }
       const attempt = started.attempt;
+      // Reject a second concurrent continuation of the same sidekick session.
+      // The tracker reservation is released so later turns are not wedged.
+      if (invocation.mode === "continue" && activeSessionIds.has(invocation.sessionId)) {
+        tracker.cancel(attempt);
+        results[item.index] = blockedResult(
+          "session_active",
+          0,
+          tracker.retryLimit(),
+        );
+        continue;
+      }
+      if (invocation.mode === "continue") activeSessionIds.add(invocation.sessionId);
       await onEvent?.({
         type: "delegation_started",
         index: item.index,
         taskCount,
-        task: item.task,
+        task,
         model: presentation?.model,
       });
       let result: SidekickResult;
       try {
         result = managerFacingResult(
-          await runner(item.task, {
+          await runner(task, {
             index: item.index,
             signal,
             onActivity: (activity) =>
@@ -302,6 +399,9 @@ async function runBounded(
                 taskCount,
                 activity,
               }),
+            ...(invocation.mode === "continue"
+              ? { sessionId: invocation.sessionId }
+              : {}),
           }),
         );
       } catch (error) {
@@ -323,12 +423,15 @@ async function runBounded(
         }
       }
       results[item.index] = result;
+      // Continuations must never hold the session lock past the finish event,
+      // including when the tracker.finish path above rejects or throws.
+      if (invocation.mode === "continue") activeSessionIds.delete(invocation.sessionId);
       await onEvent?.({
         type: "delegation_finished",
         index: item.index,
         taskCount,
         result,
-        task: item.task,
+        task,
         model: presentation?.model,
       });
     }
@@ -346,30 +449,41 @@ export function createDelegateTool(
   const limit = concurrencyLimit(options.maxConcurrency);
   const runner = options.run ?? productionRunner(options.sidekick);
   const tracker = options.tracker ?? new DelegationTracker();
+  const activeSessionIds = new Set<string>();
   return {
     name: "delegate",
     description:
-      "Delegate implementation. Call with { task: \"one contract\" } for a single task, or { task: [\"a\", \"b\"] } (or the legacy { tasks: [...] }) for independent parallel tasks. Exactly one of `task`/`tasks`; never both. Each task runs in a fresh isolated sidekick session; results are compact reports; max 3 concurrent. Equivalent active tasks and repeated no-progress retries are blocked.",
+      "Delegate implementation. Call with { task: \"one contract\" } for a single task, or { task: [\"a\", \"b\"] } (or the legacy { tasks: [...] }) for independent parallel tasks. To continue a prior sidekick session with a focused correction, call { task: \"correction\", sessionId: \"<sidekick sessionId>\" }. Exactly one of `task`/`tasks`; never both. Fresh tasks run in isolated sidekick sessions; a continuation resumes that session's own history only. Results are compact reports; max 3 concurrent. Equivalent active tasks and repeated no-progress retries are blocked.",
     parameters: delegateParameters,
     execute: async (
       rawArguments: Record<string, unknown>,
       context: ToolExecutionContext,
     ): Promise<ToolExecutionResult> => {
       const args = rawArguments as DelegateArguments;
-      const tasks = resolveTasks(args);
-      const isSingle = typeof args.task === "string";
-      const results = new Array<SidekickResult>(tasks.length);
+      const invocations = resolveInvocations(args);
+      const isSingle = invocations.length === 1;
+      const results = new Array<SidekickResult>(invocations.length);
       const prepared: PreparedTask[] = [];
 
       // Reserve identities synchronously before workers begin, so duplicate tasks
       // cannot launch twice. Workspace baselines are deliberately captured by the
-      // bounded worker immediately before the sidekick is dispatched.
-      const starts = tasks.map((task) => tracker.reserve(task, context.turn));
+      // bounded worker immediately before the sidekick is dispatched. Continuations
+      // are fingerprinted by their session identity plus task, so the same task
+      // across distinct sidekick sessions stays a valid separate workflow.
+      const starts = invocations.map((invocation) =>
+        tracker.reserve(
+          invocation.task,
+          context.turn,
+          invocation.mode === "continue"
+            ? `continue:${invocation.sessionId}:${normalizeDelegationTask(invocation.task)}`
+            : undefined,
+        ),
+      );
       for (const [index, start] of starts.entries()) {
-        const task = tasks[index];
-        if (task === undefined) continue;
+        const invocation = invocations[index];
+        if (invocation === undefined) continue;
         if (start.allowed) {
-          prepared.push({ index, task, reservation: start.reservation });
+          prepared.push({ index, invocation, reservation: start.reservation });
         } else {
           results[index] = blockedResult(
             start.reason,
@@ -381,13 +495,14 @@ export function createDelegateTool(
 
       await runBounded(
         prepared,
-        tasks.length,
+        invocations.length,
         limit,
         runner,
         context.signal,
         options.onEvent,
         tracker,
         results,
+        activeSessionIds,
         { model: options.sidekick?.config.model },
       );
       const compact = isSingle ? results[0] : results;
