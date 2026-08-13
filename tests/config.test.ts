@@ -200,6 +200,41 @@ describe("layered config", () => {
     ).rejects.toBeInstanceOf(ConfigValidationError);
   });
 
+  test("review.maxReviewIterations defaults to 2", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), { ...roles });
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(config.review).toEqual({ maxReviewIterations: 2 });
+  });
+
+  test("review.maxReviewIterations is configurable and merged across layers", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(home, ".mimin", "config.json"), {
+      ...roles,
+      review: { maxReviewIterations: 4 },
+    });
+    const config = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(config.review.maxReviewIterations).toBe(4);
+
+    // Project layer overrides.
+    await writeJson(join(project, ".mimin", "config.json"), {
+      review: { maxReviewIterations: 1 },
+    });
+    const overridden = await loadConfig({ cwd: project, homeDir: home, env: {} });
+    expect(overridden.review.maxReviewIterations).toBe(1);
+  });
+
+  test("review.maxReviewIterations rejects non-integer values", async () => {
+    const { home, project } = await fixture();
+    await writeJson(join(project, ".mimin", "config.json"), {
+      ...roles,
+      review: { maxReviewIterations: "many" },
+    });
+    await expect(
+      loadConfig({ cwd: project, homeDir: home, env: {} }),
+    ).rejects.toBeInstanceOf(ConfigValidationError);
+  });
+
   test("a role with an empty provider inherits the other role's provider (global)", async () => {
     const { home, project } = await fixture();
     await writeJson(join(project, ".mimin", "config.json"), {

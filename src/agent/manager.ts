@@ -20,7 +20,11 @@ import {
   VerificationFailureTracker,
 } from "../tools/verification.js";
 import type { VerificationSpawn } from "../tools/verification.js";
-import { commandCodeCredentials, modelFromRole, type ModelResolver } from "./model.js";
+import {
+  commandCodeCredentials,
+  modelFromRole,
+  type ModelResolver,
+} from "./model.js";
 import { runAgent } from "./run.js";
 import { withInjectionWarning } from "./security-prompt.js";
 import type {
@@ -37,6 +41,11 @@ import type {
   AgentRunConfig,
   AnyAgentTool,
 } from "./types.js";
+import {
+  restoreTaskBoard,
+  type TaskBoardPersistence,
+} from "../task/persistence.js";
+import { createTaskReviewTool } from "../task/tools.js";
 
 export type ManagerRunFunction = (
   options: RunAgentOptions,
@@ -66,6 +75,14 @@ export interface CreateManagerToolsOptions {
   delegationTracker?: DelegationTracker;
   /** Optional test seam. Production creates a fresh tracker for this tool collection. */
   verificationFailureTracker?: VerificationFailureTracker;
+  /**
+   * Optional task-board persistence attached to this manager session. When
+   * provided, the board is restored from the session's `task_board` event
+   * records on resume (with recovery applied) and a fresh snapshot is
+   * persisted after every mutation. Omit for manager runs that do not
+   * participate in the task review loop.
+   */
+  taskBoardPersistence?: TaskBoardPersistence;
 }
 
 /** Mechanical manager permission boundary: read, delegate, retrieval, and fixed verification. */
@@ -105,8 +122,11 @@ export function createManagerTools(
     maxConcurrency: options.maxDelegationConcurrency,
     onEvent: options.onDelegateEvent,
     tracker: delegationTracker,
+    ...(options.taskBoardPersistence
+      ? { taskBoard: options.taskBoardPersistence.board }
+      : {}),
   };
-  return [
+  const tools: AnyAgentTool[] = [
     createReadTool(options.workspace),
     createDelegateTool(delegateOptions),
     createMemorySearchTool({
@@ -126,6 +146,15 @@ export function createManagerTools(
       failureTracker: verificationFailureTracker,
     }),
   ];
+  if (options.taskBoardPersistence) {
+    tools.push(
+      createTaskReviewTool({
+        board: options.taskBoardPersistence.board,
+        maxReviewIterations: options.config.review.maxReviewIterations,
+      }),
+    );
+  }
+  return tools;
 }
 
 export interface RunManagerOptions extends CreateManagerToolsOptions {
@@ -150,6 +179,39 @@ export interface ManagerResult extends RunAgentResult {
   finalText: string;
 }
 
+/**
+ * Resolve the task board persistence for a manager run.
+ *
+ * Fresh runs keep the caller-supplied board. Resume runs rebuild the board
+ * from the session's persisted `task_board` snapshots and apply recovery:
+ * tasks left `running`/`reviewing`/`revising` by a crashed run are moved to
+ * a safe state when their sidekick session no longer exists in the store.
+ */
+async function resolveTaskBoardPersistence(
+  session: Awaited<ReturnType<SessionStore["createSession"]>>,
+  store: SessionStore,
+  options: RunManagerOptions,
+): Promise<TaskBoardPersistence | undefined> {
+  const supplied = options.taskBoardPersistence;
+  if (!supplied) return undefined;
+
+  if (!options.sessionId) {
+    return { ...supplied, recoveredTaskIds: [] };
+  }
+
+  // Gather the sidekick session ids that still exist so recovery can
+  // distinguish a live binding from a stale one after a crash.
+  const validSidekickIds = new Set<string>();
+  for (const summary of await store.listSessions("sidekick")) {
+    validSidekickIds.add(summary.id);
+  }
+  const { board, recoveredTaskIds } = restoreTaskBoard(
+    session,
+    validSidekickIds,
+  );
+  return { ...supplied, board, recoveredTaskIds };
+}
+
 /** Create/resume a manager conversation and run it through the generic loop. */
 export async function runManager(
   options: RunManagerOptions,
@@ -161,6 +223,10 @@ export async function runManager(
   const session = options.sessionId
     ? await store.loadSession("manager", options.sessionId)
     : await store.createSession("manager");
+
+  // Restore the task board on resume before any model resolution, so
+  // recovered tasks are visible to the manager from the first turn.
+  const taskBoard = await resolveTaskBoardPersistence(session, store, options);
 
   // Persist user intent before any model resolution or streaming can fail.
   await session.append({
@@ -199,6 +265,7 @@ export async function runManager(
       verificationTimeoutMs: options.verificationTimeoutMs,
       delegationTracker: options.delegationTracker,
       verificationFailureTracker: options.verificationFailureTracker,
+      ...(taskBoard ? { taskBoardPersistence: taskBoard } : {}),
     }),
     config: {
       ...options.runConfig,
@@ -210,6 +277,10 @@ export async function runManager(
     signal: options.signal,
     onEvent: options.onEvent,
   });
+
+  // Persist the final board snapshot after the run, so task mutations made
+  // through delegate/task_review during this run survive a later resume.
+  await taskBoard?.persist();
 
   return {
     ...result,

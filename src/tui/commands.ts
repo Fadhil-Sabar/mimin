@@ -11,6 +11,9 @@ import { suggestProviders } from "./provider-suggestions.js";
 
 /** The name of every interactive slash command, for the usage help text. */
 export const INTERACTIVE_COMMAND_NAMES = [
+  "/tasks",
+  "/task <task-id>",
+  "/status",
   "/session [<session-id>]",
   "/model [manager|sidekick] [<provider-id> <model-id>]",
   "/provider [<provider-id>]",
@@ -84,6 +87,9 @@ export type SessionSuggestionSource = (role: "manager" | "sidekick") => Promise<
   { id: string; label?: string; description?: string }[]
 >;
 
+/** Task id suggestions for the /task command (from the live task board). */
+export type TaskIdSuggestionSource = () => Promise<string[]>;
+
 /** Fetch the provider dropdown for the /provider command. */
 function providerIdCompletions(
   suggest: ProviderSuggestionSource,
@@ -119,12 +125,38 @@ export function createSlashCommands(
   providerOf: RoleProviderResolver,
   sessionSource?: SessionSuggestionSource,
   suggestProvidersSource?: ProviderSuggestionSource,
+  taskIdSource?: TaskIdSuggestionSource,
 ): SlashCommand[] {
   const providers = suggestProvidersSource ?? (async () => []);
   return [
     {
       name: "/help",
       description: "Show the interactive command family",
+    },
+    {
+      name: "/tasks",
+      description: "List the current task board",
+    },
+    {
+      name: "/task",
+      description: "Show one task's full detail",
+      argumentHint: "<task-id>",
+      getArgumentCompletions(
+        argumentPrefix: string,
+      ): AutocompleteItem[] | Promise<AutocompleteItem[] | null> | null {
+        if (!taskIdSource) return null;
+        const prefix = argumentPrefix.trim().toUpperCase();
+        return taskIdSource().then((ids) => {
+          const items = ids
+            .filter((id) => id.toUpperCase().startsWith(prefix))
+            .map((id) => ({ value: id, label: id }));
+          return items.length > 0 ? items : null;
+        });
+      },
+    },
+    {
+      name: "/status",
+      description: "Show run status: tasks, sidekicks, reviews, changes",
     },
     {
       name: "/session",

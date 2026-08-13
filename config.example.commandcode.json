@@ -4,6 +4,9 @@
     "reserveTokens": 8000
   },
   "dataDir": "~/.mimin/data",
+  "review": {
+    "maxReviewIterations": 2
+  },
   "manager": {
     "provider": "commandcode",
     "model": "gpt-5.5",

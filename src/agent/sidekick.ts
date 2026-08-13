@@ -6,6 +6,11 @@ import { SessionStore } from "../session/session.js";
 import { createBashTool } from "../tools/bash.js";
 import { createEditTool } from "../tools/edit.js";
 import { createReadTool } from "../tools/read.js";
+import {
+  diffGitChanges,
+  readGitChanges,
+  type GitChanges,
+} from "../task/git-changes.js";
 import { commandCodeCredentials, modelFromRole, type ModelResolver } from "./model.js";
 import { runAgent } from "./run.js";
 import { withInjectionWarning } from "./security-prompt.js";
@@ -43,6 +48,16 @@ export interface SidekickResult {
   sessionId: string;
   detail?: string;
   error?: string;
+  /** Risks, open questions, or areas the manager should double-check. */
+  concerns?: string[];
+  /** Suggested follow-up work (e.g. next task in a chain). */
+  nextSteps?: string[];
+  /**
+   * Git change summary attributed to this sidekick: the delta between the
+   * workspace state when it started and when it finished. Omitted when the
+   * workspace is not a git repository.
+   */
+  gitChanges?: GitChanges;
 }
 
 export type SidekickActivityEvent =
@@ -258,12 +273,17 @@ export function parseSidekickResult(
       ? "blocked"
       : parsedStatus;
 
+  const concerns = uniqueStrings(parsed.concerns);
+  const nextSteps = uniqueStrings(parsed.nextSteps);
+
   return {
     status: normalizedStatus,
     summary,
     filesChanged,
     verification: normalizeVerification(parsed.verification),
     sessionId: options.sessionId,
+    ...(concerns.length > 0 ? { concerns } : {}),
+    ...(nextSteps.length > 0 ? { nextSteps } : {}),
     ...(detail ? { detail } : {}),
     ...(parsedError || runError ? { error: parsedError || runError } : {}),
   };
@@ -309,6 +329,13 @@ export async function runSidekick(
     ? await store.loadSession("sidekick", options.sessionId)
     : await store.createSession("sidekick");
   const observedFiles: string[] = [];
+
+  // Baseline the workspace before any sidekick mutation so the completion
+  // delta can be attributed to this sidekick (pre-existing user changes are
+  // excluded). Non-git workspaces simply omit gitChanges from the result.
+  const baselineGitChanges = await readGitChanges(options.workspace).catch(
+    () => undefined,
+  );
 
   const activity = async (event: SidekickActivityEvent): Promise<void> => {
     await session.appendEvent(event);
@@ -400,6 +427,25 @@ export async function runSidekick(
     runError: runResult.error,
     observedFiles,
   });
+
+  // Attribute the completion git delta to this sidekick only when the
+  // baseline was captured and the workspace is a git repository.
+  if (baselineGitChanges && !baselineGitChanges.unavailable) {
+    const completionGitChanges = await readGitChanges(options.workspace).catch(
+      () => undefined,
+    );
+    if (completionGitChanges && !completionGitChanges.unavailable) {
+      const delta = diffGitChanges(baselineGitChanges, completionGitChanges);
+      if (
+        delta.modified.length > 0 ||
+        delta.added.length > 0 ||
+        delta.deleted.length > 0
+      ) {
+        result.gitChanges = delta;
+      }
+    }
+  }
+
   await activity({
     type: "sidekick_finished",
     sessionId: session.id,

@@ -81,6 +81,7 @@ const config = (dataDir: string): AgentConfig => ({
   sidekick: { provider: "fake-provider", model: "sidekick", thinking: "off" },
   memory: { auto: true },
   security: { injectionWarning: true },
+  review: { maxReviewIterations: 2 },
 });
 
 function assistant(
@@ -327,6 +328,208 @@ describe("isolated compact sidekick results", () => {
         runError: "provider failed",
       }),
     ).toMatchObject({ status: "blocked", error: "provider failed" });
+  });
+
+  test("parses concerns and nextSteps from structured results", () => {
+    const result = parseSidekickResult(
+      JSON.stringify({
+        status: "partial",
+        summary: "fix applied but edge case remains",
+        filesChanged: ["src/auth.ts"],
+        verification: [
+          { command: "bun test auth.test.ts", status: "failed", summary: "1 failing" },
+        ],
+        concerns: ["expired refresh tokens are not covered"],
+        nextSteps: ["handle expired-token case", "add regression test"],
+      }),
+      { sessionId: "session-concerns", runStatus: "completed" },
+    );
+    expect(result.status).toBe("partial");
+    expect(result.concerns).toEqual(["expired refresh tokens are not covered"]);
+    expect(result.nextSteps).toEqual(["handle expired-token case", "add regression test"]);
+    expect(result.verification[0]!.status).toBe("failed");
+  });
+
+  test("omits concerns/nextSteps when absent", () => {
+    const result = parseSidekickResult(
+      JSON.stringify({
+        status: "complete",
+        summary: "done",
+        filesChanged: [],
+        verification: [],
+      }),
+      { sessionId: "session-plain", runStatus: "completed" },
+    );
+    expect(result.concerns).toBeUndefined();
+    expect(result.nextSteps).toBeUndefined();
+  });
+
+  test("delegate whitelists concerns, nextSteps, and gitChanges from the sidekick result", async () => {
+    const withExtra = {
+      status: "partial",
+      summary: "edge case remains",
+      filesChanged: ["src/auth.ts"],
+      verification: [
+        { command: "bun test auth.test.ts", status: "failed", summary: "1 failing" },
+      ],
+      concerns: ["expired refresh tokens are not covered"],
+      nextSteps: ["handle expired-token case", "add regression test"],
+      gitChanges: {
+        modified: ["src/auth.ts"],
+        added: ["src/auth.test.ts"],
+        deleted: [],
+        insertions: 12,
+        deletions: 4,
+      },
+      sessionId: "sidekick-1",
+      messages: ["SIDEKICK TRANSCRIPT"],
+      commandLogs: "FULL COMMAND LOG",
+    } as SidekickResult & { messages: string[]; commandLogs: string };
+
+    const delegate = createDelegateTool({ run: async () => withExtra });
+    const output = await execute(delegate, { task: "self-contained task" });
+    const parsed = JSON.parse((output as { text: string }).text) as SidekickResult;
+
+    expect(parsed.concerns).toEqual(["expired refresh tokens are not covered"]);
+    expect(parsed.nextSteps).toEqual(["handle expired-token case", "add regression test"]);
+    expect(parsed.gitChanges).toEqual({
+      modified: ["src/auth.ts"],
+      added: ["src/auth.test.ts"],
+      deleted: [],
+      insertions: 12,
+      deletions: 4,
+    });
+    // Transcript/logs never cross the whitelist.
+    const serialized = JSON.stringify(output);
+    expect(serialized).not.toContain("SIDEKICK TRANSCRIPT");
+    expect(serialized).not.toContain("FULL COMMAND LOG");
+  });
+
+  test("delegate drops gitChanges when the sidekick reported none", async () => {
+    const plain: SidekickResult = {
+      status: "complete",
+      summary: "done",
+      filesChanged: [],
+      verification: [],
+      sessionId: "sidekick-1",
+    };
+    const delegate = createDelegateTool({ run: async () => plain });
+    const output = await execute(delegate, { task: "task" });
+    const parsed = JSON.parse((output as { text: string }).text) as SidekickResult;
+    expect(parsed.gitChanges).toBeUndefined();
+    expect(parsed.concerns).toBeUndefined();
+    expect(parsed.nextSteps).toBeUndefined();
+  });
+
+  test("runSidekick attributes the git delta to the sidekick and omits pre-existing changes", async () => {
+    const { workspace, dataDir } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    await Bun.write(join(workspace, "tracked.ts"), "baseline\n");
+    await git(workspace, ["add", ".keep", "tracked.ts"]);
+    await git(workspace, [
+      "-c", "user.name=mimin test",
+      "-c", "user.email=mimin@example.invalid",
+      "commit", "--quiet", "-m", "initial",
+    ]);
+    // Pre-existing user change must not be attributed to the sidekick.
+    await Bun.write(join(workspace, "user.ts"), "user work\n");
+
+    const result = await runSidekick({
+      task: "task",
+      workspace,
+      config: config(dataDir).sidekick,
+      model,
+      run: async () => {
+        // The sidekick modifies one tracked file and adds one new file.
+        await Bun.write(join(workspace, "tracked.ts"), "sidekick change\n");
+        await Bun.write(join(workspace, "new.ts"), "sidekick new file\n");
+        return {
+          status: "completed",
+          turns: 1,
+          toolCalls: 2,
+          messages: [],
+          finalMessage: assistant([{ type: "text", text: JSON.stringify({
+            status: "complete",
+            summary: "done",
+            filesChanged: ["tracked.ts", "new.ts"],
+            verification: [{ command: "bun test", status: "passed" }],
+          }) }]),
+        };
+      },
+    });
+    expect(result.gitChanges).toBeDefined();
+    // The sidekick's own delta is attributed; the pre-existing user change is not.
+    expect(result.gitChanges!.modified).toContain("tracked.ts");
+    expect(result.gitChanges!.added).toContain("new.ts");
+    expect(result.gitChanges!.modified).not.toContain("user.ts");
+    expect(result.gitChanges!.added).not.toContain("user.ts");
+  });
+
+  test("runSidekick captures gitChanges after a real edit in a git workspace", async () => {
+    const { workspace, dataDir } = await fixture();
+    await git(workspace, ["init", "--quiet"]);
+    await Bun.write(join(workspace, "tracked.ts"), "original\n");
+    await git(workspace, ["add", ".keep", "tracked.ts"]);
+    await git(workspace, [
+      "-c", "user.name=mimin test",
+      "-c", "user.email=mimin@example.invalid",
+      "commit", "--quiet", "-m", "initial",
+    ]);
+
+    // Inject a run function that makes a real edit before returning the final
+    // assistant message, so the completion git delta is non-empty.
+    const result = await runSidekick({
+      task: "Implement feature",
+      workspace,
+      config: config(dataDir).sidekick,
+      model,
+      run: async () => {
+        await Bun.write(join(workspace, "new.ts"), "export const value = 1;\n");
+        await Bun.write(join(workspace, "tracked.ts"), "changed\n");
+        return {
+          status: "completed",
+          turns: 1,
+          toolCalls: 1,
+          messages: [],
+          finalMessage: assistant([{ type: "text", text: JSON.stringify({
+            status: "complete",
+            summary: "done",
+            filesChanged: ["new.ts", "tracked.ts"],
+            verification: [{ command: "bun test", status: "passed" }],
+          }) }]),
+        };
+      },
+    });
+    expect(result.gitChanges).toBeDefined();
+    expect(result.gitChanges!.modified).toContain("tracked.ts");
+    expect(result.gitChanges!.added).toContain("new.ts");
+    expect(result.gitChanges!.unavailable).toBeUndefined();
+  });
+
+  test("runSidekick omits gitChanges outside a git repository", async () => {
+    const { workspace, dataDir } = await fixture();
+    const result = await runSidekick({
+      task: "Implement feature",
+      workspace,
+      config: config(dataDir).sidekick,
+      model,
+      run: async () => {
+        await Bun.write(join(workspace, "new.ts"), "export const value = 1;\n");
+        return {
+          status: "completed",
+          turns: 1,
+          toolCalls: 1,
+          messages: [],
+          finalMessage: assistant([{ type: "text", text: JSON.stringify({
+            status: "complete",
+            summary: "done",
+            filesChanged: ["new.ts"],
+            verification: [{ command: "bun test", status: "passed" }],
+          }) }]),
+        };
+      },
+    });
+    expect(result.gitChanges).toBeUndefined();
   });
 });
 
@@ -1690,6 +1893,7 @@ describe("commandcode env credential forwarding", () => {
           sidekick: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "low" },
           memory: { auto: true },
       security: { injectionWarning: true },
+      review: { maxReviewIterations: 2 },
         },
         modelResolver: () => ({
           id: "gpt-5.5",
@@ -1739,6 +1943,7 @@ describe("commandcode env credential forwarding", () => {
           sidekick: { provider: "anthropic", model: "claude-sonnet-4-6", thinking: "low" },
           memory: { auto: true },
       security: { injectionWarning: true },
+      review: { maxReviewIterations: 2 },
         },
         modelResolver: () => ({
           id: "claude-sonnet-4-6",
@@ -1954,6 +2159,7 @@ describe("commandcode env credential forwarding", () => {
           sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
           memory: { auto: true },
       security: { injectionWarning: true },
+      review: { maxReviewIterations: 2 },
         },
         sidekickAuthKey: "sk-sidekick-only",
         sidekickRun: sidekickRun as never,
@@ -2029,6 +2235,7 @@ describe("commandcode env credential forwarding", () => {
           sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
           memory: { auto: true },
       security: { injectionWarning: true },
+      review: { maxReviewIterations: 2 },
         },
         // The tools layer only ever forwards the sidekick's own key; the
         // manager's key never enters this path (it lives on runManager).

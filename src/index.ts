@@ -3,6 +3,7 @@ export type {
   AgentConfig,
   ContextConfig,
   LoadConfigOptions,
+  ReviewConfig,
   RoleConfig,
   ThinkingSetting,
 } from "./config.js";
@@ -111,6 +112,30 @@ export type {
   SessionStoreOptions,
   SessionSummary,
 } from "./session/index.js";
+
+export {
+  TaskBoard,
+  isTaskStatus,
+  recoverTasks,
+  taskId,
+} from "./task/index.js";
+export type {
+  Task,
+  TaskBoardEvent,
+  TaskBoardOptions,
+  TaskCreateInput,
+  TaskDispatch,
+  TaskResultSummary,
+  TaskStatus,
+} from "./task/index.js";
+export {
+  attachTaskBoardPersistence,
+  isTaskBoardEvent,
+  restoreTaskBoard,
+} from "./task/persistence.js";
+export type {
+  TaskBoardPersistence,
+} from "./task/persistence.js";
 
 export * from "./memory/index.js";
 export * from "./tui/index.js";

@@ -289,6 +289,25 @@ export class SessionStore {
     return (await this.loadSession(role, id)).events;
   }
 
+  /**
+   * Read only the event records of a session without loading its full message
+   * history. Used for read-only task-board snapshots in the TUI/CLI. Returns
+   * an empty array when the session does not exist or cannot be parsed.
+   */
+  async peekSessionEvents(role: SessionRole, id: string): Promise<SessionEvent[]> {
+    assertRole(role);
+    const pathname = sessionPath(this.root, role, id);
+    if (!(await fileExists(pathname))) return [];
+    try {
+      const lines = await readLines(pathname);
+      return lines
+        .filter((line): line is SessionEventLine => line.type === "event")
+        .map((line) => line.event);
+    } catch {
+      return [];
+    }
+  }
+
   async listSessions(role?: SessionRole): Promise<SessionSummary[]> {
     const roles: SessionRole[] = role ? [role] : ["manager", "sidekick"];
     const summaries: SessionSummary[] = [];

@@ -9,6 +9,7 @@ function config(dataDir = "/data/root"): AgentConfig {
     sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
     memory: { auto: true },
     security: { injectionWarning: true },
+    review: { maxReviewIterations: 2 },
     context: { maxTokens: 32_000, reserveTokens: 8_000 },
   };
 }
@@ -65,5 +66,24 @@ describe("AgentRuntime", () => {
     // The snapshot is a deep copy: mutating it leaves the source config intact.
     snapshot.manager.model = "changed";
     expect(original.manager.model).toBe("manager");
+  });
+
+  test("review.maxReviewIterations is preserved through toConfig()", () => {
+    const original = config("/review/data");
+    original.review = { maxReviewIterations: 5 };
+    const runtime = new AgentRuntime(original);
+    expect(runtime.review).toEqual({ maxReviewIterations: 5 });
+    expect(runtime.toConfig().review).toEqual({ maxReviewIterations: 5 });
+    // Snapshot isolation: mutating the snapshot must not affect the runtime.
+    const snapshot = runtime.toConfig();
+    snapshot.review.maxReviewIterations = 9;
+    expect(runtime.review.maxReviewIterations).toBe(5);
+  });
+
+  test("missing review config falls back to the default of 2", () => {
+    const { review: _omitted, ...withoutReview } = config();
+    const runtime = new AgentRuntime(withoutReview as AgentConfig);
+    expect(runtime.review).toEqual({ maxReviewIterations: 2 });
+    expect(runtime.toConfig().review).toEqual({ maxReviewIterations: 2 });
   });
 });

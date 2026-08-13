@@ -4,6 +4,9 @@
     "maxTokens": 32000,
     "reserveTokens": 8000
   },
+  "review": {
+    "maxReviewIterations": 2
+  },
   "security": {
     "injectionWarning": true
   },

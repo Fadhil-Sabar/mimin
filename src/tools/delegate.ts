@@ -4,6 +4,8 @@ import type {
   ToolExecutionContext,
   ToolExecutionResult,
 } from "../agent/types.js";
+import type { TaskBoard } from "../task/task.js";
+import type { TaskResultSummary } from "../task/task.js";
 import {
   DelegationTracker,
   normalizeDelegationTask,
@@ -73,12 +75,21 @@ export interface CreateDelegateToolOptions {
   onEvent?: DelegateEventCallback;
   /** Per-manager-run loop-protection state. A standalone tool receives local state. */
   tracker?: DelegationTracker;
+  /**
+   * Optional task-board binding. When a delegation carries `taskId`, the
+   * task's existing sidekick session (if any) is continued for the revision
+   * loop, and the fresh/continued sidekick id is bound back to the task.
+   */
+  taskBoard?: TaskBoard;
 }
 
 interface DelegateArguments {
   task?: string | string[];
   tasks?: string[];
   sessionId?: string;
+  /** Optional task-board binding: when the task has an existing sidekick, the
+   *  delegation continues that same sidekick session (revision loop). */
+  taskId?: string;
 }
 
 interface PreparedTask {
@@ -134,6 +145,14 @@ const delegateParameters = Type.Object(
           "Continue this existing sidekick session (from a prior delegate result) with a focused corrective task. Omit to create a fresh sidekick session. Only a single task may be continued.",
       }),
     ),
+    taskId: Type.Optional(
+      Type.String({
+        minLength: 1,
+        maxLength: 32,
+        description:
+          "Optional task id (T01, T02, ...) this delegation belongs to. When the task already has a sidekick session, the delegation continues it (revision loop); otherwise a fresh sidekick is created and bound to the task. Mutually exclusive with sessionId.",
+      }),
+    ),
   },
   { additionalProperties: false },
 );
@@ -167,10 +186,38 @@ function assertSessionId(id: string): void {
 
 /**
  * Resolve invocations from validated arguments. A continuation (`sessionId`)
- * requires a single string task and is never mixed with a batch.
+ * requires a single string task and is never mixed with a batch. When
+ * `taskId` is supplied, the task's existing sidekick session is continued
+ * (revision loop) instead of creating a fresh one.
  */
-function resolveInvocations(args: DelegateArguments): SidekickInvocation[] {
+function resolveInvocations(
+  args: DelegateArguments,
+  board?: TaskBoard,
+): SidekickInvocation[] {
   const hasSessionId = args.sessionId !== undefined;
+  const hasTaskId = args.taskId !== undefined;
+  if (hasSessionId && hasTaskId) {
+    throw new Error("delegate accepts either sessionId or taskId, not both");
+  }
+  if (hasTaskId) {
+    if (args.tasks !== undefined || Array.isArray(args.task)) {
+      throw new Error("delegate taskId binding requires a single task");
+    }
+    const task = typeof args.task === "string" ? args.task : undefined;
+    if (!task || !task.trim()) {
+      throw new Error("delegate taskId binding requires a single task");
+    }
+    // taskId binding: continue the task's sidekick when one exists.
+    const boardTask = board?.get(args.taskId!);
+    if (!boardTask) {
+      throw new Error(`Unknown task id ${JSON.stringify(args.taskId)}`);
+    }
+    if (boardTask.sidekickId) {
+      assertSessionId(boardTask.sidekickId);
+      return [{ mode: "continue", sessionId: boardTask.sidekickId, task }];
+    }
+    return [{ mode: "fresh", task }];
+  }
   if (!hasSessionId) {
     return resolveTasks(args).map((task) => ({ mode: "fresh", task }));
   }
@@ -207,6 +254,24 @@ function managerFacingResult(result: SidekickResult): SidekickResult {
       ...(entry.summary ? { summary: compactError(entry.summary) } : {}),
     })),
     sessionId: compactError(result.sessionId),
+    ...(result.concerns ? { concerns: result.concerns.slice(0, 20).map(compactError) } : {}),
+    ...(result.nextSteps ? { nextSteps: result.nextSteps.slice(0, 20).map(compactError) } : {}),
+    ...(result.gitChanges
+      ? {
+          gitChanges: {
+            modified: result.gitChanges.modified.slice(0, 100).map(compactError),
+            added: result.gitChanges.added.slice(0, 100).map(compactError),
+            deleted: result.gitChanges.deleted.slice(0, 100).map(compactError),
+            ...(result.gitChanges.insertions !== undefined
+              ? { insertions: result.gitChanges.insertions }
+              : {}),
+            ...(result.gitChanges.deletions !== undefined
+              ? { deletions: result.gitChanges.deletions }
+              : {}),
+            ...(result.gitChanges.unavailable ? { unavailable: true } : {}),
+          },
+        }
+      : {}),
     ...(result.detail ? { detail: compactError(result.detail) } : {}),
     ...(result.error ? { error: compactError(result.error) } : {}),
   };
@@ -456,6 +521,66 @@ async function runBounded(
   );
 }
 
+/** One complete, legacy-compatible bounded delegation without task-board binding. */
+async function executePlain(
+  rawArguments: Record<string, unknown>,
+  context: ToolExecutionContext,
+  limit: number,
+  runner: SidekickRunner,
+  tracker: DelegationTracker,
+  activeSessionIds: Set<string>,
+  onEvent: DelegateEventCallback | undefined,
+  presentation?: { model?: string },
+): Promise<ToolExecutionResult> {
+  const args = rawArguments as DelegateArguments;
+  const invocations = resolveInvocations(args);
+  const isSingle = invocations.length === 1;
+  const results = new Array<SidekickResult>(invocations.length);
+  const prepared: PreparedTask[] = [];
+
+  const starts = invocations.map((invocation) =>
+    tracker.reserve(
+      invocation.task,
+      context.turn,
+      invocation.mode === "continue"
+        ? `continue:${invocation.sessionId}:${normalizeDelegationTask(invocation.task)}`
+        : undefined,
+    ),
+  );
+  for (const [index, start] of starts.entries()) {
+    const invocation = invocations[index];
+    if (invocation === undefined) continue;
+    if (start.allowed) {
+      prepared.push({ index, invocation, reservation: start.reservation });
+    } else {
+      results[index] = blockedResult(
+        start.reason,
+        start.noProgressAttempts,
+        tracker.retryLimit(),
+      );
+    }
+  }
+
+  await runBounded(
+    prepared,
+    invocations.length,
+    limit,
+    runner,
+    context.signal,
+    onEvent,
+    tracker,
+    results,
+    activeSessionIds,
+    presentation,
+  );
+  const compact = isSingle ? results[0] : results;
+  return {
+    text: JSON.stringify(compact),
+    details: compact,
+    isError: false,
+  };
+}
+
 /** Create the manager's bounded one-level delegation tool. */
 export function createDelegateTool(
   options: CreateDelegateToolOptions,
@@ -467,17 +592,46 @@ export function createDelegateTool(
   return {
     name: "delegate",
     description:
-      "Delegate implementation. Call with { task: \"one contract\" } for a single task, or { task: [\"a\", \"b\"] } (or the legacy { tasks: [...] }) for independent parallel tasks. To continue a prior sidekick session with a focused correction, call { task: \"correction\", sessionId: \"<sidekick sessionId>\" }. Exactly one of `task`/`tasks`; never both. Fresh tasks run in isolated sidekick sessions; a continuation resumes that session's own history only. Results are compact reports; max 3 concurrent. Equivalent active tasks and repeated no-progress retries are blocked.",
+      "Delegate implementation. Call with { task: \"one contract\" } for a single task, or { task: [\"a\", \"b\"] } (or the legacy { tasks: [...] }) for independent parallel tasks. To continue a prior sidekick session with a focused correction, call { task: \"correction\", sessionId: \"<sidekick sessionId>\" }. To run work that belongs to a task-board task, call { task: \"<contract>\", taskId: \"T01\" } (the task's existing sidekick is continued for revisions; otherwise a fresh sidekick is created and bound). taskId and sessionId are mutually exclusive. Exactly one of `task`/`tasks`; never both. Fresh tasks run in isolated sidekick sessions; a continuation resumes that session's own history only. Results are compact reports; max 3 concurrent. Equivalent active tasks and repeated no-progress retries are blocked.",
     parameters: delegateParameters,
     execute: async (
       rawArguments: Record<string, unknown>,
       context: ToolExecutionContext,
     ): Promise<ToolExecutionResult> => {
       const args = rawArguments as DelegateArguments;
-      const invocations = resolveInvocations(args);
+      const board = options.taskBoard;
+      const invocations = resolveInvocations(args, board);
       const isSingle = invocations.length === 1;
       const results = new Array<SidekickResult>(invocations.length);
       const prepared: PreparedTask[] = [];
+
+      // Mark the bound task running before workers start (revision loop keeps
+      // the same sidekick; fresh dispatches get a running marker too).
+      if (args.taskId && board) {
+        const task = board.get(args.taskId);
+        if (task && (task.status === "pending" || task.status === "revising")) {
+          board.transition(task.id, "running");
+        }
+      }
+
+      // If no task was bound, this is a plain (non-board) delegation. The
+      // scheduler's overlap rules cannot apply to an ad-hoc batch (the board
+      // owns task/file metadata), so fall back to the legacy bounded runner.
+      if (!args.taskId) {
+        // Legacy plain path: pass the original arguments through unchanged.
+        // resolveInvocations handles fresh, batch, and continuation shapes;
+        // the exactly-one `task`/`tasks` guard already passed validation.
+        return executePlain(
+          rawArguments,
+          context,
+          limit,
+          runner,
+          tracker,
+          activeSessionIds,
+          options.onEvent,
+          { model: options.sidekick?.config.model },
+        );
+      }
 
       // Reserve identities synchronously before workers begin, so duplicate tasks
       // cannot launch twice. Workspace baselines are deliberately captured by the
@@ -520,6 +674,40 @@ export function createDelegateTool(
         { model: options.sidekick?.config.model },
       );
       const compact = isSingle ? results[0] : results;
+
+      // Bind the task to its sidekick and move it into review. A fresh
+      // dispatch binds the new sidekick id; a revision keeps the existing
+      // sidekick (same context) and reports back to review.
+      if (args.taskId && board) {
+        const task = board.get(args.taskId);
+        if (task) {
+          const first = Array.isArray(compact) ? compact[0] : compact;
+          if (first?.sessionId && first.sessionId !== "unavailable") {
+            board.bindSidekick(task.id, first.sessionId);
+          }
+          const taskStatus: TaskResultSummary["status"] =
+            first?.status === "complete"
+              ? "completed"
+              : first?.status === "blocked"
+                ? "blocked"
+                : first?.status === "partial"
+                  ? "partial"
+                  : "needs_decision";
+          board.attachResult(task.id, {
+            status: taskStatus,
+            summary: first?.summary ?? "",
+            filesChanged: first?.filesChanged ?? [],
+            verification: first?.verification ?? [],
+            ...(first?.concerns ? { concerns: first.concerns } : {}),
+            ...(first?.nextSteps ? { nextSteps: first.nextSteps } : {}),
+            ...(first?.gitChanges ? { gitChanges: first.gitChanges } : {}),
+          });
+          if (task.status === "running") {
+            board.transition(task.id, "reviewing");
+          }
+        }
+      }
+
       return {
         text: JSON.stringify(compact),
         details: compact,

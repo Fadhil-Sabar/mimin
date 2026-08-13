@@ -42,6 +42,7 @@ const config = (dataDir: string): AgentConfig => ({
   sidekick: { provider: "fake-provider", model: "sidekick", thinking: "off" },
   memory: { auto: true },
   security: { injectionWarning: true },
+  review: { maxReviewIterations: 2 },
 });
 
 function executionContext(toolName: string): ToolExecutionContext {

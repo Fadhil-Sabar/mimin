@@ -1119,19 +1119,24 @@ describe("lightweight pi-tui areas", () => {
           { command: "bun test", status: "passed" },
           { command: "bun run typecheck", status: "passed" },
         ],
+        concerns: ["expired tokens not covered"],
+        nextSteps: ["add regression test"],
       },
     });
     const collapsed = textOf(cards.render(100));
     expect(collapsed).toContain("2 files changed · 2 checks passed");
     expect(collapsed).not.toContain("bun test");
     expect(collapsed).not.toContain("src/a.ts");
+    expect(collapsed).not.toContain("expired tokens not covered");
     // Expanding by session id surfaces the changed file and verification
-    // rows, but never raw transcripts or private fields.
+    // rows, plus concerns and next steps, but never raw transcripts.
     expect(cards.toggle("s-1")).toBe(true);
     const expanded = textOf(cards.render(100));
     expect(expanded).toContain("src/a.ts");
     expect(expanded).toContain("bun test [passed]");
     expect(expanded).toContain("bun run typecheck [passed]");
+    expect(expanded).toContain("! expired tokens not covered");
+    expect(expanded).toContain("→ add regression test");
   });
 
   test("footer editor offers slash-command autocomplete for the interactive family", async () => {

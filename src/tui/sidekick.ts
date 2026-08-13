@@ -49,6 +49,10 @@ export interface LocalSidekickResult {
   filesChanged?: string[];
   /** Presentation metadata: verification entries surfaced from the real SidekickResult. */
   verification?: { command: string; status: string }[];
+  /** Presentation metadata: risks or open questions from the real SidekickResult. */
+  concerns?: string[];
+  /** Presentation metadata: suggested follow-up work from the real SidekickResult. */
+  nextSteps?: string[];
 }
 
 /** Structural mirror of delegate events; no import from the agent layer is needed. */
@@ -102,6 +106,8 @@ interface SidekickCard {
   summary?: string;
   filesChanged?: string[];
   verification?: { command: string; status: string }[];
+  concerns?: string[];
+  nextSteps?: string[];
   expanded: boolean;
   activities: SafeToolActivity[];
   order: number;
@@ -274,6 +280,12 @@ export class SidekickActivity implements Component {
         command: compact(entry.command, 120),
         status: compact(entry.status, 24),
       }));
+    }
+    if (result.concerns !== undefined) {
+      card.concerns = result.concerns.slice(0, 20).map((entry) => compact(entry, 200));
+    }
+    if (result.nextSteps !== undefined) {
+      card.nextSteps = result.nextSteps.slice(0, 20).map((entry) => compact(entry, 200));
     }
     const sessionId = compact(result.sessionId, 80);
     if (sessionId) {
@@ -463,7 +475,7 @@ function renderCard(card: SidekickCard, width: number): string[] {
   return lines.map((line) => truncateToWidth(line, width));
 }
 
-/** Safe detail rows for an expanded card: changed files + verification. */
+/** Safe detail rows for an expanded card: changed files + verification + concerns + next steps. */
 function expandedRows(card: SidekickCard, limit: number): string[] {
   const rows: string[] = [];
   for (const file of card.filesChanged ?? []) {
@@ -472,6 +484,12 @@ function expandedRows(card: SidekickCard, limit: number): string[] {
   for (const entry of card.verification ?? []) {
     const result = entry.status === "passed" ? green(entry.status) : yellow(entry.status);
     rows.push(`${compact(entry.command, Math.max(1, limit - 3))} [${result}]`);
+  }
+  for (const concern of card.concerns ?? []) {
+    rows.push(yellow(`! ${compact(concern, Math.max(1, limit - 2))}`));
+  }
+  for (const step of card.nextSteps ?? []) {
+    rows.push(`→ ${compact(step, Math.max(1, limit - 2))}`);
   }
   return rows;
 }

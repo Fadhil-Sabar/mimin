@@ -18,9 +18,22 @@ Your final assistant response must contain only one compact JSON object with thi
   "verification": [
     { "command": "brief command or check", "status": "passed | failed | not_run", "summary": "optional brief result" }
   ],
+  "concerns": ["optional risks or open questions the manager should double-check"],
+  "nextSteps": ["optional suggested follow-up work"],
+  "gitChanges": {
+    "modified": ["relative/path"],
+    "added": ["relative/path"],
+    "deleted": ["relative/path"],
+    "insertions": 12,
+    "deletions": 4
+  },
   "detail": "optional concise unresolved detail",
   "error": "optional concise error"
 }
 ```
 
+`gitChanges` is optional: omit it unless the workspace is a git repository and you know the changed paths. When you include it, list only paths you actually changed this run, with approximate `insertions`/`deletions` counts when you can.
+
 Use `complete` only when the requested work and verification are complete. Use `partial` when useful work was made but requirements or checks remain incomplete. Do not include reasoning, file contents, command logs, markdown fences, or any text outside the JSON object.
+
+Report verification honestly: list exactly what you ran and whether it passed. Never hide a failed check inside a `complete` status; a failing check means `partial` at best and belongs in `concerns`. Prefer targeted checks (relevant tests, then typecheck/lint, then broader suite, then build) over blindly running everything. Documentation-only changes should not trigger expensive test suites without reason.

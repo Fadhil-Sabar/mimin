@@ -32,6 +32,14 @@ export interface SecurityConfig {
   injectionWarning: boolean;
 }
 
+export interface ReviewConfig {
+  /**
+   * Maximum number of review/revision cycles per task before the manager
+   * must accept or fail it. Prevents infinite review loops. Defaults to 2.
+   */
+  maxReviewIterations: number;
+}
+
 /** Bounded provider input context, leaving room for responses and tool calls. */
 export interface ContextConfig {
   maxTokens: number;
@@ -44,6 +52,7 @@ export interface AgentConfig {
   sidekick: RoleConfig;
   memory: MemoryConfig;
   security: SecurityConfig;
+  review: ReviewConfig;
   /** Optional in the public type for compatibility with programmatic callers. */
   context?: ContextConfig;
 }
@@ -225,6 +234,19 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     injectionWarning: typeof injectionWarning === "boolean" ? injectionWarning : true,
   };
 
+  const reviewRaw = isObject(raw.review) ? raw.review : {};
+  const maxReviewIterations = reviewRaw.maxReviewIterations;
+  if (
+    maxReviewIterations !== undefined &&
+    (!Number.isInteger(maxReviewIterations) || (maxReviewIterations as number) < 0)
+  ) {
+    issues.push("review.maxReviewIterations must be a non-negative integer");
+  }
+  const reviewConfig: ReviewConfig = {
+    maxReviewIterations:
+      typeof maxReviewIterations === "number" ? maxReviewIterations : 2,
+  };
+
   const contextRaw = isObject(raw.context) ? raw.context : {};
   const maxTokens = contextRaw.maxTokens;
   const reserveTokens = contextRaw.reserveTokens;
@@ -272,6 +294,7 @@ function validateConfig(raw: RawObject, dataDir: string): AgentConfig {
     sidekick: sidekickConfig,
     memory: memoryConfig,
     security: securityConfig,
+    review: reviewConfig,
     context: contextConfig,
   };
 }
@@ -302,6 +325,7 @@ export function defaultConfig(options: LoadConfigOptions = {}): AgentConfig {
     sidekick: { provider: "", model: "", thinking: "medium" },
     memory: { auto: true },
     security: { injectionWarning: true },
+    review: { maxReviewIterations: 2 },
     context: { maxTokens: 32_000, reserveTokens: 8_000 },
   };
 }
@@ -332,6 +356,7 @@ export async function loadConfig(
         sidekick: defaults.sidekick,
         memory: defaults.memory,
         security: defaults.security,
+        review: defaults.review,
         context: defaults.context,
       },
       globalLayer,

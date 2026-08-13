@@ -91,6 +91,16 @@ An optional `security` section controls the prompt-injection defense:
 
 It defaults to `true`. When enabled, mimin prepends a security notice to both the manager and sidekick system prompts, and tags file contents and command output as untrusted data in the provider context. The heuristic scan flags common injection patterns (behavior overrides, secret exfiltration requests, hidden instructions, output-control phrasing) and surfaces the risk in the tool result details. This is defense in depth, not a guarantee: treat repository files and command output as untrusted input.
 
+An optional `review` section controls the manager's task review loop:
+
+```json
+{
+  "review": { "maxReviewIterations": 2 }
+}
+```
+
+`review.maxReviewIterations` bounds how many review/revision cycles a task may go through before the manager must accept or fail it (default `2`). This is a loop bound, not a turn limit: it only caps how many times the manager may send a task back for revision. Setting it to `0` disables revision entirely: a task is accepted or failed on the first review. Higher values allow more corrective passes before the manager must finish. See [Task lifecycle (v0.4.0)](#task-lifecycle-v040) for how the loop works.
+
 ## Usage
 
 ```sh
@@ -114,12 +124,35 @@ Since v0.3.2 the manager can **continue** an existing sidekick session for focus
 
 The continued sidekick receives only its own prior session history plus the new correction. It never receives the manager transcript, another sidekick's history, memory/session search output, or current manager context. Continuation is validated through `SessionStore`: it must resolve to a real **sidekick** session in the current data store, and a manager session id, unknown id, malformed id, or arbitrary path is rejected with a compact manager-facing error. The same sidekick session cannot be continued concurrently (the second active continuation is blocked and the lock is always released on success, failure, error, or cancellation), and continuations still pass through the existing duplicate/no-progress delegation tracker, fingerprinted by session identity plus task so the same correction across distinct sessions remains valid.
 
+### Task lifecycle (v0.4.0)
+
+mimin is deliberately **not** a project-management system, but the manager tracks its own work as a lightweight task board so a multi-step request stays reviewable. A simple request produces one task; a complex request produces a small chain with explicit `dependsOn` edges. Tasks get human-readable sequential ids (`T01`, `T02`, …) and follow a deterministic lifecycle:
+
+```text
+pending → running → reviewing → revising → completed
+                              ↘         ↘
+                                failed    (back to running, same sidekick)
+```
+
+- `pending`: created, waiting for its dependencies (if any) to complete.
+- `running`: dispatched to a sidekick. The scheduler starts every task whose dependencies are completed, up to the shared 3-sidekick concurrency cap; tasks that touch overlapping files run sequentially instead of in parallel.
+- `reviewing`: the sidekick finished and the manager reviews the compact result (summary, changed files, verification, git changes, concerns) against the original task.
+- `revising`: the manager requested corrections and re-dispatched the **same** sidekick session with specific feedback.
+- `completed`: the manager accepted the work after review and verification.
+- `failed`: the manager rejected the work, or a dependency failed.
+
+The review loop is bounded: each task runs at most `review.maxReviewIterations` review/revision cycles (default `2`) before the manager must accept or fail it, so a stuck task can never loop forever. Sidekick results carry `concerns` (risks the manager should double-check) and `nextSteps` (suggested follow-up work), and the delegate result includes a bounded Git change summary so the manager can verify what actually changed. The manager stays read-only throughout — it never edits files or runs arbitrary commands itself.
+
 ### Interactive commands
 
 Slash commands are intercepted in interactive mode before any model call. Typing `/` opens an autocomplete menu; Tab applies a completion, arrow keys move the selection, and Enter confirms.
 
 ```text
 /help
+
+/tasks
+/task <task-id>
+/status
 
 /model
 /model manager <provider-id> <model-id>
@@ -135,6 +168,16 @@ Slash commands are intercepted in interactive mode before any model call. Typing
 /memory add project <text>
 /memory search <query>
 ```
+
+#### `/tasks`, `/task`, `/status`
+
+Inspect the manager's current task board without leaving the session.
+
+- `/tasks` lists every task in the current manager session with a one-character status symbol (`o` pending, `r` running, `v` reviewing, `x` revising, `✓` completed, `f` failed), its id (`T01`, `T02`, …), and title.
+- `/task <task-id>` shows the full detail for one task: description, status, dependencies, the bound sidekick session id, review iterations, and the compact sidekick result (summary, changed files, verification, concerns).
+- `/status` is the general run-status view: active manager session, task counts, active sidekicks, pending reviews, and recent workspace changes.
+
+Task state lives in the manager session, so a resumed session restores its board. Tasks bound to sidekicks that no longer exist are recovered on resume (`running` → `failed`, `revising` → `pending`) instead of being left stuck forever.
 
 #### `/model`
 

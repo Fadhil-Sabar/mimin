@@ -25,6 +25,15 @@ import { sanitizeText } from "./tui/header.js";
 import { suggestProviders, suggestProvidersWithAuth } from "./tui/provider-suggestions.js";
 import { credentialAvailable } from "./tui/provider-suggestions.js";
 import type { ProviderSuggestionSource } from "./tui/provider-suggestions.js";
+import {
+  boardForSession,
+  formatTaskCounts,
+  formatTaskDetail,
+  formatTaskList,
+  taskStatusCounts,
+} from "./tui/task-board.js";
+import { readGitChanges } from "./task/git-changes.js";
+import type { TaskBoard } from "./task/task.js";
 
 export const CLI_VERSION = "0.4.0";
 
@@ -118,6 +127,8 @@ export interface InteractiveCommandOptions {
   cancelKeyPrompt?(): void;
   /** Restore a previous manager session: load its history and switch to it. */
   restoreSession?(sessionId: string): Promise<string | undefined>;
+  /** Live task board for /tasks, /task, and /status (task tracking active). */
+  taskBoard?(): TaskBoard | undefined;
 }
 
 const USAGE = `Usage: mimin [--continue] ["task"]
@@ -435,6 +446,58 @@ async function handleSessionCommand(
   options.showInfo(`Restored manager session ${terminalText(restored, 100)}.`);
 }
 
+/** Extended status: version, roles, task/sidekick/changes summary (interactive). */
+async function handleStatusCommand(options: InteractiveCommandOptions): Promise<void> {
+  const lines = [
+    `mimin v${CLI_VERSION}`,
+    "",
+    "Manager",
+    roleLabel(options.runtime.manager),
+    "",
+    "Sidekick",
+    roleLabel(options.runtime.sidekick),
+  ];
+  const board = await options.taskBoard?.();
+  if (board) {
+    const counts = taskStatusCounts(board);
+    lines.push(
+      "",
+      "Tasks",
+      formatTaskCounts(board) || "no tasks",
+    );
+    const active = counts.running + counts.revising;
+    lines.push("", "Sidekicks", `${active} active`);
+    const changed = board.tasks
+      .flatMap((task) => task.lastResult?.filesChanged ?? [])
+      .filter((value, index, all) => all.indexOf(value) === index);
+    if (changed.length > 0) {
+      lines.push("", "Changes", `${changed.length} file${changed.length === 1 ? "" : "s"} changed`);
+      lines.push(changed.slice(0, 8).join("\n"));
+    }
+    const reviewing = counts.reviewing + counts.revising;
+    if (reviewing > 0) lines.push("", "Review", `${reviewing} pending`);
+  }
+  // Live workspace changes (bounded, best-effort, read-only).
+  try {
+    const changes = await readGitChanges(options.workspace);
+    if (!changes.unavailable && (
+      changes.modified.length > 0 ||
+      changes.added.length > 0 ||
+      changes.deleted.length > 0
+    )) {
+      const paths = [
+        ...changes.modified.map((path) => `M ${path}`),
+        ...changes.added.map((path) => `A ${path}`),
+        ...changes.deleted.map((path) => `D ${path}`),
+      ];
+      lines.push("", "Workspace", ...paths.slice(0, 10));
+    }
+  } catch {
+    // Workspace git state is best-effort; never break /status on it.
+  }
+  options.showInfo(lines.join("\n"));
+}
+
 /** Intercept the deliberately tiny interactive command family before model invocation. */
 export async function handleInteractiveCommand(
   line: string,
@@ -458,6 +521,33 @@ export async function handleInteractiveCommand(
   }
   if (line === "/session" || line.startsWith("/session ")) {
     await handleSessionCommand(line, options);
+    return true;
+  }
+  if (line === "/tasks") {
+    const board = await options.taskBoard?.();
+    if (!board) {
+      options.showInfo("No task tracking is active in this session.");
+      return true;
+    }
+    options.showInfo(formatTaskList(board));
+    return true;
+  }
+  if (line.startsWith("/task ")) {
+    const board = await options.taskBoard?.();
+    if (!board) {
+      options.showInfo("No task tracking is active in this session.");
+      return true;
+    }
+    const id = line.slice("/task".length).trim();
+    if (!id) {
+      options.showInfo("Usage: /task <id>  (e.g. /task T01)");
+      return true;
+    }
+    options.showInfo(formatTaskDetail(board, id));
+    return true;
+  }
+  if (line === "/status") {
+    await handleStatusCommand(options);
     return true;
   }
   if (!line.startsWith("/memory")) return false;
@@ -565,9 +655,16 @@ async function runDirect(
         if (event.type === "delegation_started") {
           io.stderr(`Sidekick ${event.index + 1}/${event.taskCount} started.\n`);
         } else if (event.type === "delegation_finished") {
+          const result = event.result;
           io.stderr(
-            `Sidekick ${event.index + 1}/${event.taskCount} ${event.result.status}: ${terminalText(event.result.summary, 300)}\n`,
+            `Sidekick ${event.index + 1}/${event.taskCount} ${result.status}: ${terminalText(result.summary, 300)}\n`,
           );
+          for (const concern of result.concerns ?? []) {
+            io.stderr(`  ! ${terminalText(concern, 200)}\n`);
+          }
+          for (const step of result.nextSteps ?? []) {
+            io.stderr(`  → ${terminalText(step, 200)}\n`);
+          }
         }
       },
     });
@@ -611,6 +708,12 @@ async function runInteractive(
     return 1;
   }
   if (!sessionId) sessionId = (await store.createSession("manager")).id;
+
+  // Live task-board cache for /tasks, /task, and /status. Refreshed from the
+  // manager session's persisted `task_board` events after every run and on
+  // session restore, so the commands always show the newest state. The option
+  // is synchronous because the cache is in-memory.
+  let liveBoard = await boardForSession(store, sessionId);
 
   const runtime = new AgentRuntime(config);
   let app: CliTui | undefined;
@@ -681,6 +784,7 @@ async function runInteractive(
         auth,
         promptForKey: (provider) => app?.promptForKey(provider),
         cancelKeyPrompt: () => app?.cancelKeyPrompt(),
+        taskBoard: () => liveBoard,
         restoreSession: async (id) => {
           try {
             const session = await store.loadSession("manager", id);
@@ -698,6 +802,7 @@ async function runInteractive(
               }
             }
             sessionId = id;
+            liveBoard = await boardForSession(store, sessionId);
             app?.setStatus({ sessionId });
             app?.restoreSession(entries);
             return id;
@@ -767,6 +872,7 @@ async function runInteractive(
           onDelegateEvent: (event) => app?.handleDelegateEvent(event),
         });
         sessionId = result.sessionId;
+        liveBoard = await boardForSession(store, sessionId);
         app?.setStatus({ sessionId });
         completed = result.status === "completed";
         if (result.status === "aborted") {

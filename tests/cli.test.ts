@@ -18,6 +18,7 @@ import { AuthStore } from "../src/auth.js";
 import { MemoryStore } from "../src/memory/store.js";
 import { SessionStore } from "../src/session/session.js";
 import type { AgentTuiOptions } from "../src/tui/app.js";
+import { TaskBoard } from "../src/task/task.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -38,6 +39,7 @@ async function fixture(): Promise<{ workspace: string; config: AgentConfig }> {
       sidekick: { provider: "fake", model: "sidekick", thinking: "off" },
       memory: { auto: true },
       security: { injectionWarning: true },
+      review: { maxReviewIterations: 2 },
     },
   };
 }
@@ -176,6 +178,7 @@ describe("CLI argument and noninteractive paths", () => {
       sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
       memory: { auto: true },
       security: { injectionWarning: true },
+      review: { maxReviewIterations: 2 },
     };
     const io = captureIo();
     const previous = process.env.COMMANDCODE_API_KEY;
@@ -351,6 +354,7 @@ describe("interactive integration", () => {
       sidekick: { provider: "commandcode", model: "gpt-5.5", thinking: "off" },
       memory: { auto: true },
       security: { injectionWarning: true },
+      review: { maxReviewIterations: 2 },
     };
     const previous = process.env.COMMANDCODE_API_KEY;
     delete process.env.COMMANDCODE_API_KEY;
@@ -486,6 +490,69 @@ describe("interactive integration", () => {
     expect(info.at(-1)).toContain("[user]");
     expect(info.at(-1)).toContain("[project]");
     expect(errors).toEqual([]);
+  });
+
+  test("/tasks, /task, and /status render the task board", async () => {
+    const { workspace, config } = await fixture();
+    const board = new TaskBoard();
+    const t1 = board.create({ title: "investigate auth", description: "i" });
+    const t2 = board.create({
+      title: "implement fix",
+      description: "impl",
+      dependsOn: [t1.id],
+    });
+    board.transition(t1.id, "completed");
+    board.transition(t2.id, "running");
+    board.bindSidekick(t2.id, "sidekick-1");
+
+    const info: string[] = [];
+    const errors: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime: new AgentRuntime(config),
+      showInfo: (text: string) => { info.push(text); },
+      showError: (text: string) => { errors.push(text); },
+      taskBoard: () => board,
+    };
+
+    expect(await handleInteractiveCommand("/tasks", options)).toBe(true);
+    const list = info.at(-1) ?? "";
+    expect(list).toContain("✓ T01 investigate auth");
+    expect(list).toContain("r T02 implement fix");
+    // Running/revising tasks surface their bound sidekick session id.
+    expect(list).toContain("sidekick-1");
+
+    expect(await handleInteractiveCommand("/task T02", options)).toBe(true);
+    const detail = info.at(-1) ?? "";
+    expect(detail).toContain("T02 · implement fix");
+    expect(detail).toContain("running");
+    expect(detail).toContain("sidekick-1");
+
+    expect(await handleInteractiveCommand("/task T99", options)).toBe(true);
+    expect(info.at(-1)).toContain("Unknown task");
+
+    expect(await handleInteractiveCommand("/status", options)).toBe(true);
+    const status = info.at(-1) ?? "";
+    expect(status).toContain("mimin v0.4.0");
+    expect(status).toContain("1 running · 1 completed");
+    expect(status).toContain("Sidekicks");
+    expect(status).toContain("1 active");
+    expect(errors).toEqual([]);
+  });
+
+  test("/tasks reports when no task tracking is active", async () => {
+    const { workspace, config } = await fixture();
+    const info: string[] = [];
+    const options = {
+      memory: new MemoryStore({ dataDir: config.dataDir, workspace }),
+      workspace,
+      runtime: new AgentRuntime(config),
+      showInfo: (text: string) => { info.push(text); },
+      showError: () => {},
+    };
+    expect(await handleInteractiveCommand("/tasks", options)).toBe(true);
+    expect(info.at(-1)).toContain("No task tracking");
   });
 
   test("/provider shows credential hints and never renders credential values", async () => {
