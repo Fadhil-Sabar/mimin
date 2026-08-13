@@ -1,7 +1,7 @@
 import { truncateToWidth, type Component } from "@mariozechner/pi-tui";
 import { sanitizeText } from "./header.js";
 import { cyan, dim, green, yellow } from "./theme.js";
-import type { TaskBoard } from "../task/task.js";
+import { isTaskStatus, type TaskBoard, type TaskStatus } from "../task/task.js";
 import { taskStatusSymbol } from "./task-board.js";
 
 /**
@@ -22,7 +22,7 @@ const MAX_TASK_ROWS = 6;
 interface TaskRow {
   id: string;
   title: string;
-  status: string;
+  status: TaskStatus;
   /** Bound sidekick session id (running/revising tasks only). */
   sidekickId?: string;
 }
@@ -61,15 +61,18 @@ export class TasksPanel implements Component {
   private rows(): TaskRow[] {
     const board = this.board;
     if (!board || board.tasks.length === 0) return [];
-    return board.tasks.slice(0, MAX_TASK_ROWS).map((task) => ({
-      id: task.id,
-      title: compact(task.title, 80),
-      status: task.status,
-      ...(task.sidekickId &&
-        (task.status === "running" || task.status === "revising")
-        ? { sidekickId: task.sidekickId }
-        : {}),
-    }));
+    return board.tasks.slice(0, MAX_TASK_ROWS).map((task) => {
+      const status: TaskStatus = isTaskStatus(task.status) ? task.status : "pending";
+      return {
+        id: task.id,
+        title: compact(task.title, 80),
+        status,
+        ...(task.sidekickId &&
+          (task.status === "running" || task.status === "revising")
+          ? { sidekickId: task.sidekickId }
+          : {}),
+      };
+    });
   }
 
   /** One-line status summary: counts + sidekick share. */
@@ -116,8 +119,8 @@ function compact(value: unknown, limit: number): string {
 }
 
 /** Status-colored symbol: active states emphasized, done dimmed. */
-function colorizeStatus(status: string, symbol: string): string {
-  if (status === "completed") return dim(`✓`);
+function colorizeStatus(status: TaskStatus, symbol: string): string {
+  if (status === "completed") return dim("✓");
   if (status === "failed") return yellow("f");
   if (status === "running" || status === "revising") return cyan(symbol);
   return dim(symbol);

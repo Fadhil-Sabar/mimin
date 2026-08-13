@@ -19,6 +19,8 @@ import {
 import { ToolActivity, type LocalToolEvent } from "./tool-activity.js";
 import { Transcript, type TranscriptRole } from "./transcript.js";
 import { AnimationTicker } from "./animation.js";
+import { TasksPanel } from "./tasks-panel.js";
+import type { TaskBoard } from "../task/task.js";
 
 export interface TuiHost {
   addChild(component: Component): void;
@@ -111,6 +113,8 @@ export class AgentTui {
   readonly sidekicks: SidekickActivity;
   readonly tools: ToolActivity;
   readonly footer: Footer;
+  /** Compact task-board panel; renders inline in the transcript. */
+  readonly tasks: TasksPanel;
   /** Begin a masked API-key prompt for a provider (renders in the footer). */
   promptForKey: (provider: string) => void;
   /** Cancel the active masked key prompt. */
@@ -121,6 +125,8 @@ export class AgentTui {
   private readonly toolBlockByTurn = new Map<number, string>();
   /** Transcript live block id for each inline sidekick card (by card id). */
   private readonly sidekickBlockByCard = new Map<string, string>();
+  /** Transcript live block id for the task-board panel. */
+  private taskBlockId?: string;
   private runState: HeaderRunState = "idle";
   private started = false;
   private mouseTrackingEnabled = false;
@@ -153,6 +159,7 @@ export class AgentTui {
     this.transcript.onBeforeRender = (width) => this.syncTranscriptHeight(width);
     this.sidekicks = new SidekickActivity(options.workspace, undefined, this.animation.state);
     this.tools = new ToolActivity(this.animation.state);
+    this.tasks = new TasksPanel();
     this.footer = new Footer({
       managerModel: options.managerModel,
       thinking: options.thinking,
