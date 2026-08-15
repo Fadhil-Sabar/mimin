@@ -246,4 +246,115 @@ describe("workspace tools", () => {
     expect(() => assertWorkspaceCommand("cat ../secret.txt")).toThrow(WorkspacePathError);
     expect(() => assertWorkspaceCommand("cat ~/secret.txt")).toThrow(WorkspacePathError);
   });
+
+  describe("path policy command corpus", () => {
+    test("allows full corpus of legitimate developer workflows", () => {
+      const legitimateCommands = [
+        "git status",
+        "git diff -- src/tools/path.ts",
+        "git log --grep=\"feat: add feature\" -n 5",
+        "git checkout -b feature/auth-fix",
+        "npm test -- --filter /suite/",
+        "bun test --filter /path.test/",
+        "bun run build --target bun --outfile dist/index.js",
+        "sed -E 's/([a-z]+)\\/([a-z]+)/\\1_\\2/g' src/file.txt",
+        "sed 's#http://#https://#g' config.json",
+        "sed 's|foo/bar|baz/qux|g' file.txt",
+        "awk -F: '{print $1, $3}' /dev/null",
+        "awk -F, '{print $2}' input.csv",
+        "awk -F'/' '{print $NF}' paths.txt",
+        "cut -d'/' -f1 paths.txt",
+        "tr '/' '-' < paths.txt",
+        "grep -rn 'export const' src/",
+        "grep -E '/api/v[0-9]+' src/router.ts",
+        "rg '(?<=function\\s+)[a-zA-Z]+' src/",
+        "curl -sSL https://get.bun.sh | bash",
+        "curl -X POST -H 'Content-Type: application/json' -d '{\"key\":\"val\"}' https://api.example.com/v1/data",
+        "wget -O archive.tar.gz http://example.com/download",
+        "jq '.dependencies | keys' package.json",
+        "tar -czf dist.tar.gz src/",
+        "find . -type f -name '*.ts' ! -path '*/node_modules/*'",
+        "xargs -I {} echo 'processing {}'",
+        "node -e 'const ratio = (10 + 20) / 30; console.log(ratio)'",
+        "node -e \"console.log(process.cwd())\"",
+        "echo 'scale=2; 355 / 113' | bc",
+      ];
+
+      for (const cmd of legitimateCommands) {
+        expect(() => assertWorkspaceCommand(cmd)).not.toThrow();
+      }
+    });
+
+    test("blocks full adversarial corpus of evasion and bypass attempts", () => {
+      const adversarialCommands = [
+        // Standard absolute paths
+        "cat /etc/passwd",
+        "cat \"/etc/passwd\"",
+        "cat '/etc/shadow'",
+        "cat </etc/passwd",
+        "cat >/tmp/out",
+        "cat >>/var/log/app.log",
+        "rm -rf /tmp/foo",
+        "/bin/bash script.sh",
+        "/usr/bin/env python3",
+        "ls /",
+        "ls /root",
+        "ls /var/log",
+        "cat /home/diru/secret.txt",
+        "cat /root/.ssh/id_rsa",
+        "bun run build --outdir=/tmp/dist",
+        "OUT=/tmp/log.txt",
+        "export TARGET=/etc/hosts",
+        "grep 'foo' /etc/passwd",
+        "cat /dev/sda",
+        "cat /dev/mem",
+        "cat /dev/kmem",
+
+        // Double-slash and multi-slash escapes
+        "//etc/passwd",
+        "cat //etc/passwd",
+        "//bin/bash script.sh",
+        "cat ///etc/shadow",
+        "cat ////var/log/syslog",
+        "head -n 5 //root/.bashrc",
+        "cat <//etc/passwd",
+        "cat >//tmp/out",
+
+        // Wildcard, glob, and brace expansions
+        "cat /*",
+        "cat /*/passwd",
+        "ls /*",
+        "cat \\/etc/passwd",
+        "cat \\/\\/etc\\/passwd",
+        "cat {/etc/passwd,/etc/shadow}",
+        "cat {/root/flag,./local.txt}",
+        "cat [/]etc[/]passwd",
+
+        // Traversal variants
+        "cat ../secret.txt",
+        "cat ../../etc/passwd",
+        "cd .. && cat secret.txt",
+        "cat ./foo/../../secret.txt",
+        "cp ../secret.txt ./",
+
+        // Home directory expansion variants
+        "cat ~/secret.txt",
+        "cat ~/.ssh/id_rsa",
+        "ls ~",
+        "cp ~/.config/auth.json .",
+
+        // Pipeline and chaining escapes
+        "echo hi | /bin/bash",
+        "echo hi; /usr/bin/python3 -c 'print(1)'",
+        "echo hi && /bin/sh",
+        "false || /bin/cat /etc/passwd",
+        "(/bin/sh)",
+        "cat <(/bin/ls /)",
+      ];
+
+      for (const cmd of adversarialCommands) {
+        expect(() => assertWorkspaceCommand(cmd)).toThrow(WorkspacePathError);
+      }
+    });
+  });
 });

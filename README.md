@@ -37,7 +37,7 @@ export COMMANDCODE_API_KEY='...'
 
 Model IDs are accepted exactly as configured; pick any ID returned by `/models` (e.g. `gpt-5.5`, `gpt-5.4`, `deepseek/deepseek-v4-pro`, `claude-sonnet-4-6`, `Qwen/Qwen3.8-Max`). Use the same provider for both roles, or mix Command Code with any built-in provider. The `COMMANDCODE_API_KEY` export is forwarded to Command Code only; it is never sent to another provider's endpoint, and built-in providers never require it. If it is missing when a role uses `commandcode`, mimin fails fast with an error naming `COMMANDCODE_API_KEY`.
 
-`claude-*` model IDs automatically route through Command Code's Anthropic-compatible `POST /messages` protocol (`anthropic-messages`), while all other models route through its OpenAI-compatible `POST /chat/completions` protocol (`openai-completions`).
+`claude-*` model IDs automatically route through Command Code's Anthropic-compatible Messages protocol (`anthropic-messages` targeting `POST https://api.commandcode.ai/provider/v1/messages` with `x-api-key` and `anthropic-version: 2023-06-01`), while all other models route through its OpenAI-compatible Chat Completions protocol (`openai-completions` targeting `POST https://api.commandcode.ai/provider/v1/chat/completions` with `Authorization: Bearer <key>`).
 
 Since the model catalog is live and mimin performs no startup network discovery, arbitrary IDs use a conservative metadata budget (`contextWindow` 128,000, `maxTokens` 16,384, zero cost) that is safe for every catalog entry.
 
@@ -284,7 +284,11 @@ auth.json
 
 `auth.json` holds API keys entered via `/provider` (chmod 600; environment variables take precedence).
 
-Manager conversations can be continued, and each complete sidekick history remains isolated for provider-safe continuation. Reasoning and tool logs stay inside their role-scoped histories and are excluded from delegation results, the TUI, and `session_search`. Project memory filenames derive from the canonical workspace path.
+## Release Notes (v0.5.0)
+
+* **Refined Bash Path Containment Heuristics:** Replaced rigid slash matching with syntactic masking for safe constructs (URLs, `/dev/null` and safe `/dev/` streams, sed/awk regexes, delimiter flags, arithmetic division) while strictly enforcing workspace boundaries and blocking genuine absolute paths, multi-slash bypasses (`//etc/passwd`), glob expansions (`/*`), and directory traversal.
+* **Configurable Verification Test Runner:** Manager verification `test` action now detects and executes `package.json` `"scripts": { "test": "..." }` via `bun run test`, falling back to `bun test` when unconfigured.
+* **Dual-Protocol Command Code Provider Integration:** Added protocol routing for [Command Code](https://commandcode.ai), directing `claude-*` models to Anthropic-compatible `POST /messages` (`anthropic-messages`) and all other models to OpenAI-compatible `POST /chat/completions` (`openai-completions`).
 
 ## Development and verification
 

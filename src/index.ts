@@ -36,6 +36,7 @@ export { AgentRuntime } from "./agent/runtime.js";
 export {
   COMMANDCODE_API_KEY_ENV_VAR,
   COMMANDCODE_CLAUDE_API,
+  COMMANDCODE_CLAUDE_BASE_URL,
   COMMANDCODE_METADATA,
   commandCodeCredentials,
 } from "./agent/model.js";
