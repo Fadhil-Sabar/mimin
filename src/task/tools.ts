@@ -113,7 +113,8 @@ export function formatTaskList(board: TaskBoard): string {
       task.sidekickId && (task.status === "running" || task.status === "revising")
         ? `\n    ${task.sidekickId}`
         : "";
-    lines.push(`${marker} ${task.id} ${task.title}${sidekick}${waitsText}`);
+    const duration = task.durationMs !== undefined ? ` (${Math.round(task.durationMs)}ms)` : "";
+    lines.push(`${marker} ${task.id} ${task.title}${duration}${sidekick}${waitsText}`);
   }
   return lines.join("\n");
 }
@@ -125,8 +126,11 @@ export function formatTaskDetail(board: TaskBoard, taskId: string): string {
     `${task.id} · ${task.title}`,
     "",
     "Status",
-    task.status,
+    task.status + (task.reviewIterations ? ` (review ${task.reviewIterations})` : ""),
   ];
+  if (task.durationMs !== undefined) {
+    lines.push("", "Duration", `${Math.round(task.durationMs)}ms`);
+  }
   if (task.sidekickId) lines.push("", "Sidekick", task.sidekickId);
   if (task.dependsOn && task.dependsOn.length > 0) {
     lines.push("", "Depends on", task.dependsOn.join(", "));

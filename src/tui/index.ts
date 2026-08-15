@@ -48,3 +48,18 @@ export type { TranscriptEntry, TranscriptRole } from "./transcript.js";
 
 export { ToolActivity } from "./tool-activity.js";
 export type { LocalToolEvent } from "./tool-activity.js";
+
+export { TasksPanel } from "./tasks-panel.js";
+export type { TasksPanelOptions } from "./tasks-panel.js";
+
+export {
+  formatTaskList,
+  formatTaskDetail,
+  formatTaskRecord,
+  formatDuration,
+  taskListRows,
+  taskStatusSymbol,
+  taskStatusCounts,
+  formatTaskCounts,
+} from "./task-board.js";
+export type { TaskListRow, TaskStatusCounts } from "./task-board.js";

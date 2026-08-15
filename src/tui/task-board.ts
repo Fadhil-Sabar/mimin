@@ -24,6 +24,10 @@ export interface TaskListRow {
   waitingOn: string[];
   /** Review iterations completed (0 when never revised). */
   reviewIterations: number;
+  /** Elapsed or total task duration in milliseconds. */
+  durationMs?: number;
+  /** Verification summary string e.g. "2 passed" or "1 failed". */
+  verificationSummary?: string;
   /** Compact sidekick result summary (completed/failed tasks). */
   summary?: string;
 }
@@ -42,17 +46,35 @@ export function taskStatusSymbol(status: TaskStatus): string {
   return TASK_STATUS_SYMBOLS[status] ?? "o";
 }
 
+export function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`;
+  const mins = Math.floor(ms / 60000);
+  const secs = Math.floor((ms % 60000) / 1000);
+  return `${mins}m ${secs}s`;
+}
+
 /** Map every task on a board to a compact list row (read-only). */
 export function taskListRows(board: TaskBoard): TaskListRow[] {
-  return board.tasks.map((task) => ({
-    id: task.id,
-    title: task.title,
-    status: task.status,
-    ...(task.sidekickId ? { sidekickId: task.sidekickId } : {}),
-    waitingOn: board.incompleteDependencies(task),
-    reviewIterations: task.reviewIterations ?? 0,
-    ...(task.lastResult?.summary ? { summary: task.lastResult.summary } : {}),
-  }));
+  return board.tasks.map((task) => {
+    let verificationSummary: string | undefined;
+    if (task.lastResult?.verification && task.lastResult.verification.length > 0) {
+      const passed = task.lastResult.verification.filter((v) => v.status === "passed").length;
+      const failed = task.lastResult.verification.filter((v) => v.status !== "passed").length;
+      verificationSummary = failed > 0 ? `${failed} failed` : `${passed} passed`;
+    }
+    return {
+      id: task.id,
+      title: task.title,
+      status: task.status,
+      ...(task.sidekickId ? { sidekickId: task.sidekickId } : {}),
+      waitingOn: board.incompleteDependencies(task),
+      reviewIterations: task.reviewIterations ?? 0,
+      ...(task.durationMs !== undefined ? { durationMs: task.durationMs } : {}),
+      ...(verificationSummary ? { verificationSummary } : {}),
+      ...(task.lastResult?.summary ? { summary: task.lastResult.summary } : {}),
+    };
+  });
 }
 
 /** Rebuild the newest board snapshot from a manager session's events. */
@@ -109,9 +131,12 @@ export function formatTaskList(board: TaskBoard): string {
     const symbol = taskStatusSymbol(row.status);
     const active = row.status === "running" || row.status === "revising";
     const sidekick = active && row.sidekickId ? ` · ${row.sidekickId}` : "";
+    const duration = row.durationMs !== undefined ? ` · ${formatDuration(row.durationMs)}` : "";
+    const reviews = row.reviewIterations > 0 ? ` · rev ${row.reviewIterations}` : "";
+    const verification = row.verificationSummary ? ` · ${row.verificationSummary}` : "";
     const waits =
       row.waitingOn.length > 0 ? ` · waits for ${row.waitingOn.join(", ")}` : "";
-    return `  ${symbol} ${row.id} ${taskText(row.title, 120)}${sidekick}${waits}`;
+    return `  ${symbol} ${row.id} ${taskText(row.title, 120)}${sidekick}${duration}${reviews}${verification}${waits}`;
   });
   return ["Tasks", ...lines].join("\n");
 }
@@ -129,10 +154,18 @@ export function formatTaskRecord(task: Task, board: TaskBoard): string {
     `${task.id} · ${taskText(task.title, 160)}`,
     "",
     `Status: ${task.status}${task.reviewIterations ? ` (review ${task.reviewIterations})` : ""}`,
+  ];
+  if (task.durationMs !== undefined) {
+    lines.push(`Duration: ${formatDuration(task.durationMs)}`);
+  } else if (task.startedAt && (task.status === "running" || task.status === "revising")) {
+    const elapsed = Math.max(0, Date.now() - task.startedAt);
+    lines.push(`Running for: ${formatDuration(elapsed)}`);
+  }
+  lines.push(
     "",
     "Description",
     taskText(task.description, 400) || "(none)",
-  ];
+  );
   if (task.sidekickId) lines.push("", `Sidekick: ${task.sidekickId}`);
   const waiting = board.incompleteDependencies(task);
   if (waiting.length > 0) lines.push("", `Waiting for: ${waiting.join(", ")}`);
@@ -145,9 +178,11 @@ export function formatTaskRecord(task: Task, board: TaskBoard): string {
       lines.push("", "Files changed", ...task.lastResult.filesChanged.slice(0, 50));
     }
     if (task.lastResult.verification.length > 0) {
+      const passed = task.lastResult.verification.filter((v) => v.status === "passed").length;
+      const failed = task.lastResult.verification.filter((v) => v.status !== "passed").length;
       lines.push(
         "",
-        "Verification",
+        `Verification (${passed} passed${failed > 0 ? `, ${failed} failed` : ""})`,
         ...task.lastResult.verification.slice(0, 50).map(
           (entry) => `  ${entry.status === "passed" ? "✓" : "×"} ${taskText(entry.command, 120)}`,
         ),
@@ -159,6 +194,19 @@ export function formatTaskRecord(task: Task, board: TaskBoard): string {
     if (task.lastResult.nextSteps && task.lastResult.nextSteps.length > 0) {
       lines.push("", "Next steps", ...task.lastResult.nextSteps.slice(0, 20));
     }
+  }
+  if (task.events && task.events.length > 0) {
+    lines.push(
+      "",
+      "History",
+      ...task.events.slice(-10).map((ev) => {
+        const time = new Date(ev.timestamp).toLocaleTimeString();
+        const transition = ev.from ? `${ev.from} -> ${ev.to}` : ev.to;
+        const sidekick = ev.sidekickId ? ` (${ev.sidekickId})` : "";
+        const detail = ev.detail && ev.detail !== "created" && !ev.detail.startsWith("bound sidekick") ? ` · ${ev.detail}` : "";
+        return `  [${time}] ${transition}${sidekick}${detail}`;
+      }),
+    );
   }
   if (task.pendingFeedback) lines.push("", "Pending feedback", taskText(task.pendingFeedback, 300));
   return lines.join("\n");

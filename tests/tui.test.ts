@@ -2005,4 +2005,63 @@ describe("lightweight pi-tui areas", () => {
     expect(app.animation.running).toBe(false);
     app.stop();
   });
+
+  test("TasksPanel renders task duration, review iterations, and verification indicators compactly", () => {
+    const { TaskBoard } = require("../src/task/task.js");
+    const { TasksPanel, formatTaskList, formatTaskRecord, formatDuration } = require("../src/tui/index.js");
+
+    expect(formatDuration(450)).toBe("450ms");
+    expect(formatDuration(1500)).toBe("1.5s");
+    expect(formatDuration(125000)).toBe("2m 5s");
+
+    let now = 1000;
+    const board = new TaskBoard({ now: () => now });
+    const t1 = board.create({ title: "Build AST parser", description: "desc" });
+    now = 1200;
+    board.transition(t1.id, "running");
+    now = 2400;
+    board.transition(t1.id, "completed");
+    board.attachResult(t1.id, {
+      status: "completed",
+      summary: "parser built ok",
+      filesChanged: ["src/tools/path.ts"],
+      verification: [{ command: "bun test", status: "passed" }],
+    });
+
+    const t2 = board.create({ title: "Fix regression", description: "desc 2" });
+    board.recordReviewIteration(t2.id);
+    now = 3000;
+    board.transition(t2.id, "revising");
+    board.bindSidekick(t2.id, "sidekick-rev");
+    board.attachResult(t2.id, {
+      status: "partial",
+      summary: "one test failed",
+      filesChanged: ["src/tools/path.ts"],
+      verification: [{ command: "bun test", status: "failed" }],
+    });
+
+    const panel = new TasksPanel({ board });
+    const lines = panel.render(80);
+    expect(lines.length).toBeGreaterThan(0);
+    const renderedText = lines.join("\n");
+    expect(renderedText).toContain("T01");
+    expect(renderedText).toContain("Build AST parser");
+    expect(renderedText).toContain("T02");
+    expect(renderedText).toContain("sidekick-rev");
+    expect(renderedText).toContain("rev 1");
+
+    // Task list formatting includes duration and verification
+    const list = formatTaskList(board);
+    expect(list).toContain("✓ T01 Build AST parser · 1.2s · 1 passed");
+    expect(list).toContain("x T02 Fix regression · sidekick-rev · rev 1 · 1 failed");
+
+    // Task record detail formatting includes history, duration, and verification
+    const detail = formatTaskRecord(t1, board);
+    expect(detail).toContain("T01 · Build AST parser");
+    expect(detail).toContain("Duration: 1.2s");
+    expect(detail).toContain("Verification (1 passed)");
+    expect(detail).toContain("History");
+    expect(detail).toContain("pending -> running");
+    expect(detail).toContain("running -> completed");
+  });
 });

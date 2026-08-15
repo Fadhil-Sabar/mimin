@@ -25,6 +25,9 @@ interface TaskRow {
   status: TaskStatus;
   /** Bound sidekick session id (running/revising tasks only). */
   sidekickId?: string;
+  durationMs?: number;
+  reviewIterations?: number;
+  verificationStatus?: "passed" | "failed";
 }
 
 export interface TasksPanelOptions {
@@ -63,6 +66,11 @@ export class TasksPanel implements Component {
     if (!board || board.tasks.length === 0) return [];
     return board.tasks.slice(0, MAX_TASK_ROWS).map((task) => {
       const status: TaskStatus = isTaskStatus(task.status) ? task.status : "pending";
+      let verificationStatus: "passed" | "failed" | undefined;
+      if (task.lastResult?.verification && task.lastResult.verification.length > 0) {
+        const hasFailure = task.lastResult.verification.some((v) => v.status !== "passed");
+        verificationStatus = hasFailure ? "failed" : "passed";
+      }
       return {
         id: task.id,
         title: compact(task.title, 80),
@@ -71,6 +79,9 @@ export class TasksPanel implements Component {
           (task.status === "running" || task.status === "revising")
           ? { sidekickId: task.sidekickId }
           : {}),
+        ...(task.durationMs !== undefined ? { durationMs: task.durationMs } : {}),
+        ...(task.reviewIterations && task.reviewIterations > 0 ? { reviewIterations: task.reviewIterations } : {}),
+        ...(verificationStatus ? { verificationStatus } : {}),
       };
     });
   }
@@ -102,8 +113,10 @@ export class TasksPanel implements Component {
     for (const row of rows) {
       const marker = colorizeStatus(row.status, taskStatusSymbol(row.status));
       const sidekick = row.sidekickId ? ` ${dim(`· ${row.sidekickId}`)}` : "";
+      const reviews = row.reviewIterations ? ` ${dim(`· rev ${row.reviewIterations}`)}` : "";
+      const verify = row.verificationStatus === "failed" ? ` ${yellow("×")}` : row.verificationStatus === "passed" ? ` ${green("✓")}` : "";
       lines.push(truncateToWidth(
-        ` ${marker} ${dim(row.id)} ${row.title}${sidekick}`,
+        ` ${marker} ${dim(row.id)} ${row.title}${sidekick}${reviews}${verify}`,
         width,
       ));
     }

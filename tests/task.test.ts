@@ -509,4 +509,45 @@ describe("task board resume recovery", () => {
     expect(restored.get("T01")!.status).toBe("running");
     expect(restored.get("T01")!.sidekickId).toBe(sidekick.id);
   });
+
+  test("tracks duration and records complete transition event history", () => {
+    let mockTime = 1000;
+    const board = new TaskBoard({ now: () => mockTime });
+    const task = board.create({ title: "Build feature", description: "desc" });
+
+    expect(task.events).toHaveLength(1);
+    expect(task.events![0]!.to).toBe("pending");
+    expect(task.events![0]!.timestamp).toBe(1000);
+
+    mockTime = 1200;
+    board.bindSidekick(task.id, "sidekick-alpha");
+    expect(task.events).toHaveLength(2);
+    expect(task.events![1]!.sidekickId).toBe("sidekick-alpha");
+
+    mockTime = 1500;
+    board.transition(task.id, "running", "dispatched to sidekick");
+    expect(task.startedAt).toBe(1500);
+    expect(task.events).toHaveLength(3);
+    expect(task.events![2]!.from).toBe("pending");
+    expect(task.events![2]!.to).toBe("running");
+    expect(task.events![2]!.detail).toBe("dispatched to sidekick");
+
+    mockTime = 3000;
+    board.transition(task.id, "completed", "verified successfully");
+    expect(task.completedAt).toBe(3000);
+    expect(task.durationMs).toBe(1500);
+    expect(task.events).toHaveLength(4);
+    expect(task.events![3]!.from).toBe("running");
+    expect(task.events![3]!.to).toBe("completed");
+
+    // Serialization & deserialization roundtrip
+    const serialized = board.toJSON();
+    const restored = TaskBoard.fromJSON(serialized);
+    const restoredTask = restored.get(task.id)!;
+    expect(restoredTask.startedAt).toBe(1500);
+    expect(restoredTask.completedAt).toBe(3000);
+    expect(restoredTask.durationMs).toBe(1500);
+    expect(restoredTask.events).toHaveLength(4);
+    expect(restoredTask.events![3]!.to).toBe("completed");
+  });
 });

@@ -13,6 +13,7 @@
     "dev": "bun --watch src/index.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
+    "check:version": "bun -e 'import { readFileSync } from \"node:fs\"; const pkg = JSON.parse(readFileSync(\"package.json\", \"utf8\")); const cli = readFileSync(\"src/cli.ts\", \"utf8\"); const m = cli.match(/export const CLI_VERSION = \"([^\"]+)\";/); if (!m || m[1] !== pkg.version) throw new Error(`Version mismatch: package.json=${pkg.version} cli.ts=${m ? m[1] : \"unknown\"}`);'",
     "build": "bun build src/index.ts --target bun --outfile dist/index.js --banner='#!/usr/bin/env bun'",
     "compile": "bun build --compile src/index.ts --outfile dist/mimin"
   },

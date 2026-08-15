@@ -15,6 +15,14 @@ export type TaskStatus =
   | "completed"
   | "failed";
 
+export interface TaskHistoryEvent {
+  timestamp: number;
+  from?: TaskStatus;
+  to: TaskStatus;
+  sidekickId?: string;
+  detail?: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -31,7 +39,11 @@ export interface Task {
   /** Feedback from the last `revise` decision, consumed by the next dispatch. */
   pendingFeedback?: string;
   createdAt: number;
+  startedAt?: number;
   completedAt?: number;
+  durationMs?: number;
+  /** Chronological event history for status transitions and sidekick bindings. */
+  events?: TaskHistoryEvent[];
   /** Compact sidekick result kept for the manager review and /task view. */
   lastResult?: TaskResultSummary;
 }
@@ -121,6 +133,7 @@ export class TaskBoard {
 
   create(input: TaskCreateInput): Task {
     const id = taskId(this.tasks.length);
+    const now = this.now();
     const task: Task = {
       id,
       title: input.title,
@@ -132,7 +145,14 @@ export class TaskBoard {
       ...(input.files && input.files.length > 0
         ? { files: input.files.map((file) => TaskBoard.normalizeFile(file)).filter(Boolean) }
         : {}),
-      createdAt: this.now(),
+      createdAt: now,
+      events: [
+        {
+          timestamp: now,
+          to: "pending",
+          detail: "created",
+        },
+      ],
     };
     this.tasks.push(task);
     return task;
@@ -279,13 +299,37 @@ export class TaskBoard {
     );
   }
 
-  transition(id: string, to: TaskStatus): Task {
+  transition(id: string, to: TaskStatus, detail?: string): Task {
     const task = this.get(id);
     if (!task) throw new Error(`Unknown task id ${JSON.stringify(id)}`);
+    const from = task.status;
+    const now = this.now();
     task.status = to;
-    if (to === "completed" || to === "failed") {
-      task.completedAt = this.now();
+
+    if (to === "running" || to === "revising") {
+      if (!task.startedAt) {
+        task.startedAt = now;
+      }
     }
+
+    if (to === "completed" || to === "failed") {
+      task.completedAt = now;
+      if (task.startedAt) {
+        task.durationMs = Math.max(0, task.completedAt - task.startedAt);
+      }
+    }
+
+    if (!task.events) {
+      task.events = [];
+    }
+    task.events.push({
+      timestamp: now,
+      from,
+      to,
+      ...(task.sidekickId ? { sidekickId: task.sidekickId } : {}),
+      ...(detail ? { detail } : {}),
+    });
+
     return task;
   }
 
@@ -293,6 +337,14 @@ export class TaskBoard {
     const task = this.get(id);
     if (!task) throw new Error(`Unknown task id ${JSON.stringify(id)}`);
     task.sidekickId = sidekickId;
+    if (!task.events) task.events = [];
+    task.events.push({
+      timestamp: this.now(),
+      from: task.status,
+      to: task.status,
+      sidekickId,
+      detail: `bound sidekick ${sidekickId}`,
+    });
     return task;
   }
 
@@ -312,7 +364,10 @@ export class TaskBoard {
 
   /** Serialize to plain records for session event persistence. */
   toJSON(): Task[] {
-    return this.tasks.map((task) => ({ ...task }));
+    return this.tasks.map((task) => ({
+      ...task,
+      ...(task.events ? { events: task.events.map((e) => ({ ...e })) } : {}),
+    }));
   }
 
   /** Rebuild a board from persisted records. */
@@ -354,7 +409,18 @@ export class TaskBoard {
       if (typeof record.pendingFeedback === "string") {
         task.pendingFeedback = record.pendingFeedback;
       }
+      if (typeof record.startedAt === "number") task.startedAt = record.startedAt;
       if (typeof record.completedAt === "number") task.completedAt = record.completedAt;
+      if (typeof record.durationMs === "number") task.durationMs = record.durationMs;
+      if (Array.isArray(record.events)) {
+        task.events = record.events.filter(
+          (e): e is TaskHistoryEvent =>
+            typeof e === "object" &&
+            e !== null &&
+            typeof (e as any).timestamp === "number" &&
+            isTaskStatus((e as any).to),
+        );
+      }
       if (typeof record.lastResult === "object" && record.lastResult !== null) {
         task.lastResult = record.lastResult as TaskResultSummary;
       }

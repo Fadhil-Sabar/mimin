@@ -133,10 +133,14 @@ describe("task formatting", () => {
     expect(list).toContain("sidekick-1");
   });
 
-  test("formatTaskDetail shows status, sidekick, files, verification", () => {
-    const board = new TaskBoard();
+  test("formatTaskDetail shows status, duration, sidekick, files, verification", () => {
+    let now = 1000;
+    const board = new TaskBoard({ now: () => now });
     const task = board.create({ title: "Fix auth", description: "d" });
-    board.transition(task.id, "reviewing");
+    now = 1200;
+    board.transition(task.id, "running");
+    now = 2500;
+    board.transition(task.id, "completed");
     board.bindSidekick(task.id, "sidekick-9");
     board.attachResult(task.id, {
       status: "completed",
@@ -147,7 +151,9 @@ describe("task formatting", () => {
 
     const detail = formatTaskDetail(board, task.id);
     expect(detail).toContain("T01 · Fix auth");
-    expect(detail).toContain("reviewing");
+    expect(detail).toContain("completed");
+    expect(detail).toContain("Duration");
+    expect(detail).toContain("1300ms");
     expect(detail).toContain("sidekick-9");
     expect(detail).toContain("src/auth.ts");
     expect(detail).toContain("bun test");
