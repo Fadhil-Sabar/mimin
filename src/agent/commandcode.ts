@@ -3,27 +3,26 @@ import type { Api, Model } from "@mariozechner/pi-ai";
 /**
  * Command Code provider integration.
  *
- * Command Code exposes an OpenAI-compatible Chat Completions API:
- *   base URL: https://api.commandcode.ai/provider/v1
- *   endpoint: POST /chat/completions
- *   auth:     Authorization: Bearer <key>  (from COMMANDCODE_API_KEY)
- * The /models endpoint is public and returns a growing list of model IDs
- * (e.g. `gpt-5.5`, `deepseek/deepseek-v4-flash`, `Qwen/Qwen3.8-Max`).
- * Model IDs are accepted as configured without a static registry; the
- * catalog is live and dynamic.
+ * Command Code exposes two endpoints:
+ *   1. OpenAI-compatible Chat Completions API:
+ *      base URL: https://api.commandcode.ai/provider/v1
+ *      endpoint: POST /chat/completions
+ *      protocol: openai-completions
+ *   2. Anthropic-compatible Messages API (for `claude-*` model IDs):
+ *      base URL: https://api.commandcode.ai/provider/v1
+ *      endpoint: POST /messages
+ *      protocol: anthropic-messages
  *
- * Initial resolver scope: this module targets the OpenAI-compatible
- * /chat/completions path only. Command Code routes Claude model IDs
- * (`claude-*`) through a separate Anthropic-compatible POST /messages
- * endpoint, which is not implemented here; configuring a `claude-*` ID will
- * still resolve but the request goes to /chat/completions and may be
- * rejected by the provider. Prefer non-Claude IDs until /messages support
- * is added and tested.
+ * Auth for both endpoints: Authorization: Bearer <key> (from COMMANDCODE_API_KEY).
+ * The /models endpoint is public and returns a dynamic catalog of model IDs
+ * (e.g. `gpt-5.5`, `deepseek/deepseek-v4-flash`, `claude-sonnet-4-6`, `Qwen/Qwen3.8-Max`).
+ * Model IDs are accepted as configured without a static registry.
  */
 
 export const COMMANDCODE_PROVIDER = "commandcode" as const;
 export const COMMANDCODE_BASE_URL = "https://api.commandcode.ai/provider/v1" as const;
 export const COMMANDCODE_API = "openai-completions" as const;
+export const COMMANDCODE_CLAUDE_API = "anthropic-messages" as const;
 /** Environment variable that must supply the Command Code API key. */
 export const COMMANDCODE_API_KEY_ENV_VAR = "COMMANDCODE_API_KEY" as const;
 
@@ -40,18 +39,28 @@ export function isCommandCodeProvider(provider: string): boolean {
   return provider === COMMANDCODE_PROVIDER;
 }
 
+export function isCommandCodeClaudeModel(modelId: string): boolean {
+  return modelId.startsWith("claude-");
+}
+
+export function commandCodeApiForModel(
+  modelId: string,
+): typeof COMMANDCODE_CLAUDE_API | typeof COMMANDCODE_API {
+  return isCommandCodeClaudeModel(modelId) ? COMMANDCODE_CLAUDE_API : COMMANDCODE_API;
+}
+
 /**
  * pi-ai's Model registry only knows built-in providers, so Command Code
- * models are resolved at runtime with explicit, safe metadata. The values
- * keep the OpenAI-completions stream path working (max tokens are only
- * sent when mimin configures them) and give the TUI a conservative,
- * zero-cost budget.
+ * models are resolved at runtime with explicit, safe metadata. The API protocol
+ * routes dynamically: `claude-*` model IDs use `anthropic-messages` (POST /messages)
+ * while all other model IDs use `openai-completions` (POST /chat/completions).
  */
-export function commandCodeModel(modelId: string): Model<"openai-completions"> {
+export function commandCodeModel(modelId: string): Model<Api> {
+  const api = commandCodeApiForModel(modelId);
   return {
     id: modelId,
     name: `Command Code ${modelId}`,
-    api: COMMANDCODE_API,
+    api,
     provider: COMMANDCODE_PROVIDER,
     baseUrl: COMMANDCODE_BASE_URL,
     reasoning: true,

@@ -18,7 +18,7 @@ Edit the copied config to select installed pi-ai provider/model IDs for both rol
 
 ### Command Code (custom provider)
 
-[Command Code](https://commandcode.ai) exposes an OpenAI-compatible API, and mimin resolves its models at runtime instead of requiring pi-ai's built-in registry. Configure it by setting the provider id `commandcode` for either role. The API key is read from `COMMANDCODE_API_KEY` (or `~/.mimin/data/auth.json` if set via `/provider commandcode`) — never store the key in config.
+[Command Code](https://commandcode.ai) exposes an OpenAI-compatible API alongside an Anthropic-compatible Messages API, and mimin resolves its models at runtime instead of requiring pi-ai's built-in registry. Configure it by setting the provider id `commandcode` for either role. The API key is read from `COMMANDCODE_API_KEY` (or `~/.mimin/data/auth.json` if set via `/provider commandcode`) — never store the key in config.
 
 ```sh
 # discover your model IDs (the /models endpoint is public and unauthenticated)
@@ -35,11 +35,11 @@ export COMMANDCODE_API_KEY='...'
 }
 ```
 
-Model IDs are accepted exactly as configured; pick any non-Claude ID returned by `/models` (e.g. `gpt-5.5`, `gpt-5.4`, `deepseek/deepseek-v4-pro`, `Qwen/Qwen3.8-Max`). Use the same provider for both roles, or mix Command Code with any built-in provider. The `COMMANDCODE_API_KEY` export is forwarded to Command Code only; it is never sent to another provider's endpoint, and built-in providers never require it. If it is missing when a role uses `commandcode`, mimin fails fast with an error naming `COMMANDCODE_API_KEY`.
+Model IDs are accepted exactly as configured; pick any ID returned by `/models` (e.g. `gpt-5.5`, `gpt-5.4`, `deepseek/deepseek-v4-pro`, `claude-sonnet-4-6`, `Qwen/Qwen3.8-Max`). Use the same provider for both roles, or mix Command Code with any built-in provider. The `COMMANDCODE_API_KEY` export is forwarded to Command Code only; it is never sent to another provider's endpoint, and built-in providers never require it. If it is missing when a role uses `commandcode`, mimin fails fast with an error naming `COMMANDCODE_API_KEY`.
+
+`claude-*` model IDs automatically route through Command Code's Anthropic-compatible `POST /messages` protocol (`anthropic-messages`), while all other models route through its OpenAI-compatible `POST /chat/completions` protocol (`openai-completions`).
 
 Since the model catalog is live and mimin performs no startup network discovery, arbitrary IDs use a conservative metadata budget (`contextWindow` 128,000, `maxTokens` 16,384, zero cost) that is safe for every catalog entry.
-
-> **Claude models (initial scope):** Command Code routes `claude-*` model IDs through a separate Anthropic-compatible `POST /messages` endpoint. The initial resolver targets the OpenAI-compatible `POST /chat/completions` path only, so a `claude-*` ID resolves but the request is sent to `/chat/completions` and may be rejected by the provider. Prefer non-Claude IDs until `/messages` support is added and tested.
 
 See `config.example.commandcode.json` for a complete example.
 

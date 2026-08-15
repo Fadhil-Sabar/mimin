@@ -35,6 +35,7 @@ export { modelFromRole, resolveConfiguredModel } from "./agent/model.js";
 export { AgentRuntime } from "./agent/runtime.js";
 export {
   COMMANDCODE_API_KEY_ENV_VAR,
+  COMMANDCODE_CLAUDE_API,
   COMMANDCODE_METADATA,
   commandCodeCredentials,
 } from "./agent/model.js";

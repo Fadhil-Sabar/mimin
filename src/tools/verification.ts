@@ -181,7 +181,7 @@ function commandLabel(command: readonly string[]): string {
 
 async function configuredScript(
   workspace: string,
-  name: "typecheck" | "build",
+  name: "test" | "typecheck" | "build",
 ): Promise<string[] | undefined> {
   try {
     const parsed = JSON.parse(await Bun.file(join(workspace, "package.json")).text()) as unknown;
@@ -202,13 +202,17 @@ async function commandsFor(
 ): Promise<{ commands: string[][]; missing?: string }> {
   if (action === "git_status") return { commands: [["git", "status", "--short"]] };
   if (action === "git_diff") return { commands: [["git", "diff", "--no-ext-diff", "--"]] };
-  if (action === "test") return { commands: [["bun", "test"]] };
+  if (action === "test") {
+    const testCommand = await configuredScript(workspace, "test");
+    return { commands: [testCommand ?? ["bun", "test"]] };
+  }
   if (action === "typecheck" || action === "build") {
     const command = await configuredScript(workspace, action);
     return command
       ? { commands: [command] }
       : { commands: [], missing: `package.json has no ${action} script` };
   }
+  const testCommand = (await configuredScript(workspace, "test")) ?? ["bun", "test"];
   const typecheck = await configuredScript(workspace, "typecheck");
   const build = await configuredScript(workspace, "build");
   if (!typecheck || !build) {
@@ -217,7 +221,7 @@ async function commandsFor(
       .join(" and ");
     return { commands: [], missing: `package.json has no ${absent} script` };
   }
-  return { commands: [["bun", "test"], typecheck, build] };
+  return { commands: [testCommand, typecheck, build] };
 }
 
 async function executeCommand(

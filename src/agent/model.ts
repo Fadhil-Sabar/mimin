@@ -5,6 +5,7 @@ import {
   COMMANDCODE_API,
   COMMANDCODE_API_KEY_ENV_VAR,
   COMMANDCODE_BASE_URL,
+  COMMANDCODE_CLAUDE_API,
   COMMANDCODE_PROVIDER,
   commandCodeModel,
   isCommandCodeProvider,
@@ -84,7 +85,7 @@ export function modelFromRole(
   return resolveRoleModel(role, fallback, resolver);
 }
 
-export { COMMANDCODE_API_KEY_ENV_VAR };
+export { COMMANDCODE_API_KEY_ENV_VAR, COMMANDCODE_CLAUDE_API };
 
 /**
  * Credential resolution for a role's provider. The Command Code secret is
@@ -126,5 +127,6 @@ export const COMMANDCODE_METADATA = {
   provider: COMMANDCODE_PROVIDER,
   baseUrl: COMMANDCODE_BASE_URL,
   api: COMMANDCODE_API,
+  claudeApi: COMMANDCODE_CLAUDE_API,
   apiKeyEnvVar: COMMANDCODE_API_KEY_ENV_VAR,
 } as const;

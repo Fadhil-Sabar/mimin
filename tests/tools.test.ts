@@ -5,6 +5,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import type { Api, Model, ToolCall } from "@mariozechner/pi-ai";
 import type { AnyAgentTool, ToolExecutionContext } from "../src/agent/types.js";
 import {
+  assertWorkspaceCommand,
   createBashTool,
   createEditTool,
   createReadTool,
@@ -170,5 +171,79 @@ describe("workspace tools", () => {
     expect(result.isError).toBe(false);
     expect(result.text).toContain("[UNTRUSTED CONTENT");
     expect(result.text).toContain("hello");
+  });
+
+  test("assertWorkspaceCommand accepts URLs, stream redirects, sed/grep regexes, and division", () => {
+    // URLs
+    expect(() => assertWorkspaceCommand("curl https://api.commandcode.ai/provider/v1/models")).not.toThrow();
+    expect(() => assertWorkspaceCommand("curl -H 'Content-Type: application/json' http://localhost:3000/api")).not.toThrow();
+    expect(() => assertWorkspaceCommand("git clone https://github.com/org/repo.git")).not.toThrow();
+    expect(() => assertWorkspaceCommand("curl ftp://example.com/file")).not.toThrow();
+    expect(() => assertWorkspaceCommand("wget http://example.com/archive.tar.gz")).not.toThrow();
+
+    // Stream redirects and safe /dev/ pseudo-devices
+    expect(() => assertWorkspaceCommand("echo test > /dev/null 2>&1")).not.toThrow();
+    expect(() => assertWorkspaceCommand("echo test 2>/dev/null")).not.toThrow();
+    expect(() => assertWorkspaceCommand("echo test >/dev/null")).not.toThrow();
+    expect(() => assertWorkspaceCommand("cat </dev/null")).not.toThrow();
+    expect(() => assertWorkspaceCommand("echo hi > /dev/stderr")).not.toThrow();
+    expect(() => assertWorkspaceCommand("echo hi > /dev/stdout")).not.toThrow();
+    expect(() => assertWorkspaceCommand("head -c 10 /dev/zero")).not.toThrow();
+    expect(() => assertWorkspaceCommand("head -c 10 /dev/urandom")).not.toThrow();
+
+    // Sed and awk regex / substitution patterns
+    expect(() => assertWorkspaceCommand("sed 's/foo/bar/g' src/file.txt")).not.toThrow();
+    expect(() => assertWorkspaceCommand("sed -i '' 's/old\\/path/new\\/path/g' src/file.txt")).not.toThrow();
+    expect(() => assertWorkspaceCommand("sed '/pattern/d' file.txt")).not.toThrow();
+    expect(() => assertWorkspaceCommand("sed 'y/abc/xyz/' file.txt")).not.toThrow();
+    expect(() => assertWorkspaceCommand("awk -F'/' '{print $1}' file.txt")).not.toThrow();
+    expect(() => assertWorkspaceCommand("awk '/pattern/ {print $0}' file.txt")).not.toThrow();
+
+    // Regex flags and search patterns
+    expect(() => assertWorkspaceCommand("bun test --filter /suite/")).not.toThrow();
+    expect(() => assertWorkspaceCommand("grep -E '/api/v1' src/index.ts")).not.toThrow();
+    expect(() => assertWorkspaceCommand("rg '/[0-9]+' src/")).not.toThrow();
+    expect(() => assertWorkspaceCommand("find . -name '*.ts'")).not.toThrow();
+
+    // Arithmetic division
+    expect(() => assertWorkspaceCommand("node -e 'console.log(1/2)'")).not.toThrow();
+    expect(() => assertWorkspaceCommand("node -e \"const x = 10 / 5;\"")).not.toThrow();
+  });
+
+  test("assertWorkspaceCommand blocks genuine absolute paths, double-slash bypasses, traversal, and home expansion", () => {
+    // Direct and quoted absolute paths
+    expect(() => assertWorkspaceCommand("cat /etc/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat \"/etc/passwd\"")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat '/etc/shadow'")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat </etc/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat >/tmp/out")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("rm -rf /tmp/foo")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("/bin/bash script.sh")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("ls /")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat /home/user/file")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("bun run build --outdir=/tmp/dist")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("OUT=/tmp/log.txt")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("export TARGET=/etc/hosts")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("grep 'foo' /etc/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat /dev/sda")).toThrow(WorkspacePathError);
+
+    // Double-slash (//) and multi-slash absolute path bypasses
+    expect(() => assertWorkspaceCommand("//etc/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat //etc/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("//bin/bash script.sh")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat ///etc/shadow")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat <//etc/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat >//tmp/out")).toThrow(WorkspacePathError);
+
+    // Wildcard, escaped, and brace expansions
+    expect(() => assertWorkspaceCommand("cat /*")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat /*/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("ls /*")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat \\/etc/passwd")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat {/etc/passwd,/etc/shadow}")).toThrow(WorkspacePathError);
+
+    // Traversal and home directory expansion
+    expect(() => assertWorkspaceCommand("cat ../secret.txt")).toThrow(WorkspacePathError);
+    expect(() => assertWorkspaceCommand("cat ~/secret.txt")).toThrow(WorkspacePathError);
   });
 });

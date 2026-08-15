@@ -196,4 +196,64 @@ describe("restricted verification tool", () => {
     const laterFailure = await execute(tool, { action: "test" });
     expect(JSON.stringify(laterFailure)).not.toContain("consecutive times");
   });
+
+  test("honors configured package.json test script and falls back to bun test when absent", async () => {
+    const root = await workspace();
+    // Workspace with explicit test script
+    await Bun.write(
+      join(root, "package.json"),
+      JSON.stringify({
+        scripts: {
+          test: "vitest run",
+          typecheck: "tsc --noEmit",
+          build: "bun build index.ts",
+        },
+      }),
+    );
+    const calls: string[][] = [];
+    const spawn: VerificationSpawn = (command) => {
+      calls.push(command);
+      return {
+        stdout: new Response("ok").body,
+        stderr: new Response("").body,
+        exited: Promise.resolve(0),
+        exitCode: 0,
+      };
+    };
+    const tool = createVerificationTool({ workspace: root, spawn });
+    await execute(tool, { action: "test" });
+    expect(calls).toEqual([["bun", "run", "test"]]);
+
+    calls.length = 0;
+    await execute(tool, { action: "all" });
+    expect(calls).toEqual([
+      ["bun", "run", "test"],
+      ["bun", "run", "typecheck"],
+      ["bun", "run", "build"],
+    ]);
+
+    // Workspace without test script falls back to bun test
+    const rootWithoutTest = await workspace();
+    await Bun.write(
+      join(rootWithoutTest, "package.json"),
+      JSON.stringify({
+        scripts: {
+          typecheck: "tsc --noEmit",
+        },
+      }),
+    );
+    const fallbackCalls: string[][] = [];
+    const fallbackSpawn: VerificationSpawn = (command) => {
+      fallbackCalls.push(command);
+      return {
+        stdout: new Response("ok").body,
+        stderr: new Response("").body,
+        exited: Promise.resolve(0),
+        exitCode: 0,
+      };
+    };
+    const fallbackTool = createVerificationTool({ workspace: rootWithoutTest, spawn: fallbackSpawn });
+    await execute(fallbackTool, { action: "test" });
+    expect(fallbackCalls).toEqual([["bun", "test"]]);
+  });
 });

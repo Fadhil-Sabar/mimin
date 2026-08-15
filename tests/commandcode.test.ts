@@ -3,8 +3,11 @@ import {
   COMMANDCODE_API,
   COMMANDCODE_API_KEY_ENV_VAR,
   COMMANDCODE_BASE_URL,
+  COMMANDCODE_CLAUDE_API,
   COMMANDCODE_PROVIDER,
+  commandCodeApiForModel,
   commandCodeModel,
+  isCommandCodeClaudeModel,
   isCommandCodeProvider,
 } from "../src/agent/commandcode.js";
 import {
@@ -15,25 +18,39 @@ import {
 } from "../src/agent/model.js";
 
 describe("commandcode provider metadata", () => {
-  test("metadata matches the documented OpenAI-compatible endpoint", () => {
+  test("metadata matches the documented OpenAI-compatible and Anthropic-compatible endpoints", () => {
     expect(COMMANDCODE_METADATA.provider).toBe("commandcode");
     expect(COMMANDCODE_METADATA.baseUrl).toBe("https://api.commandcode.ai/provider/v1");
     expect(COMMANDCODE_METADATA.api).toBe("openai-completions");
+    expect(COMMANDCODE_METADATA.claudeApi).toBe("anthropic-messages");
     expect(COMMANDCODE_METADATA.apiKeyEnvVar).toBe("COMMANDCODE_API_KEY");
   });
 
   test("provider id and api constants are stable", () => {
     expect(COMMANDCODE_PROVIDER).toBe("commandcode");
     expect(COMMANDCODE_API).toBe("openai-completions");
+    expect(COMMANDCODE_CLAUDE_API).toBe("anthropic-messages");
     expect(COMMANDCODE_BASE_URL).toBe("https://api.commandcode.ai/provider/v1");
     expect(COMMANDCODE_API_KEY_ENV_VAR).toBe("COMMANDCODE_API_KEY");
     expect(isCommandCodeProvider("commandcode")).toBe(true);
     expect(isCommandCodeProvider("anthropic")).toBe(false);
   });
+
+  test("claude model identification and API routing helper", () => {
+    expect(isCommandCodeClaudeModel("claude-sonnet-4-6")).toBe(true);
+    expect(isCommandCodeClaudeModel("claude-opus-4-6")).toBe(true);
+    expect(isCommandCodeClaudeModel("claude-haiku-4-5")).toBe(true);
+    expect(isCommandCodeClaudeModel("gpt-5.5")).toBe(false);
+    expect(isCommandCodeClaudeModel("deepseek/deepseek-v4-flash")).toBe(false);
+    expect(isCommandCodeClaudeModel("Qwen/Qwen3.8-Max")).toBe(false);
+
+    expect(commandCodeApiForModel("claude-sonnet-4-6")).toBe("anthropic-messages");
+    expect(commandCodeApiForModel("gpt-5.5")).toBe("openai-completions");
+  });
 });
 
 describe("commandcode model metadata", () => {
-  test("resolves an arbitrary configured model id with safe explicit defaults", () => {
+  test("resolves a non-Claude model id to openai-completions", () => {
     const model = commandCodeModel("deepseek/deepseek-v4-flash");
     expect(model.id).toBe("deepseek/deepseek-v4-flash");
     expect(model.provider).toBe("commandcode");
@@ -41,12 +58,26 @@ describe("commandcode model metadata", () => {
     expect(model.baseUrl).toBe("https://api.commandcode.ai/provider/v1");
     expect(model.reasoning).toBe(true);
     expect(model.input).toEqual(["text"]);
-    // Conservative floor: the live catalog reports 200k+ for small models,
-    // but mimin has no startup network discovery, so arbitrary IDs get a
-    // safe context/max-token budget that cannot overflow.
     expect(model.contextWindow).toBe(128_000);
     expect(model.maxTokens).toBe(16_384);
-    // Known cost values are zero; unknown models must never guess a price.
+    expect(model.cost).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+    });
+  });
+
+  test("resolves a claude-* model id to anthropic-messages protocol", () => {
+    const model = commandCodeModel("claude-sonnet-4-6");
+    expect(model.id).toBe("claude-sonnet-4-6");
+    expect(model.provider).toBe("commandcode");
+    expect(model.api).toBe("anthropic-messages");
+    expect(model.baseUrl).toBe("https://api.commandcode.ai/provider/v1");
+    expect(model.reasoning).toBe(true);
+    expect(model.input).toEqual(["text"]);
+    expect(model.contextWindow).toBe(128_000);
+    expect(model.maxTokens).toBe(16_384);
     expect(model.cost).toEqual({
       input: 0,
       output: 0,
@@ -64,11 +95,19 @@ describe("commandcode model metadata", () => {
 });
 
 describe("commandcode model resolution", () => {
-  test("resolveConfiguredModel returns a runtime commandcode model", () => {
+  test("resolveConfiguredModel returns a runtime commandcode model for OpenAI-compatible IDs", () => {
     const model = resolveConfiguredModel("commandcode", "gpt-5.5");
     expect(model.provider).toBe("commandcode");
     expect(model.api).toBe("openai-completions");
     expect(model.id).toBe("gpt-5.5");
+    expect(model.baseUrl).toBe("https://api.commandcode.ai/provider/v1");
+  });
+
+  test("resolveConfiguredModel returns a runtime commandcode model for Claude IDs", () => {
+    const model = resolveConfiguredModel("commandcode", "claude-sonnet-4-6");
+    expect(model.provider).toBe("commandcode");
+    expect(model.api).toBe("anthropic-messages");
+    expect(model.id).toBe("claude-sonnet-4-6");
     expect(model.baseUrl).toBe("https://api.commandcode.ai/provider/v1");
   });
 
@@ -80,6 +119,16 @@ describe("commandcode model resolution", () => {
     });
     expect(model.provider).toBe("commandcode");
     expect(model.id).toBe("gpt-5.4");
+    expect(model.api).toBe("openai-completions");
+
+    const claudeModel = modelFromRole({
+      provider: "commandcode",
+      model: "claude-opus-4-6",
+      thinking: "high",
+    });
+    expect(claudeModel.provider).toBe("commandcode");
+    expect(claudeModel.id).toBe("claude-opus-4-6");
+    expect(claudeModel.api).toBe("anthropic-messages");
   });
 });
 
