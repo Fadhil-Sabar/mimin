@@ -534,7 +534,7 @@ describe("interactive integration", () => {
 
     expect(await handleInteractiveCommand("/status", options)).toBe(true);
     const status = info.at(-1) ?? "";
-    expect(status).toContain("mimin v0.5.0");
+    expect(status).toContain("mimin v0.6.0");
     expect(status).toContain("1 running · 1 completed");
     expect(status).toContain("Sidekicks");
     expect(status).toContain("1 active");

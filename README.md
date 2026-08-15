@@ -270,6 +270,14 @@ It defaults to `true` (safe because learning is limited to user-authored content
 
 Manager verification accepts only git status, git diff, `bun test`, configured `typecheck` and `build` package scripts, or the combined test+typecheck+build action. Commands, arguments, and working directories cannot be supplied by the model. The manager reads delegated files, verifies work, and can re-delegate focused corrections. A fresh delegation creates a sidekick JSONL session containing only its self-contained task; a continuation appends the correction to that same sidekick session. Complete manager and sidekick histories remain role-isolated for provider continuation and are never merged. Delegation results and TUI activity are compact whitelists, while `session_search` searches only user messages and assistant text blocks. Reasoning and tool logs never cross through delegation, the TUI, or `session_search`.
 
+### Command Policy & Security Boundary
+
+Sidekick bash commands are validated via a pre-execution shell-aware AST parser before process invocation:
+
+* **What is enforced:** Rejection of absolute filesystem access (`/etc`, `/var`, `/tmp`, `/root`, etc.), double-slash and escaped root bypasses (`//etc`, `\/etc`), directory traversal (`..`), home-directory expansion (`~`), uncontained environment variable expansions (`$HOME`, `${HOME}`, `$ROOT`, `$TMPDIR`), variable path indirection (`$VAR/path`), opaque script execution (`bash script.sh`, `sh ./script.sh`), script sourcing (`source script.sh`, `. script.sh`), piped shell interpreters (`curl ... | sh`), and dynamic OS/filesystem access in inline scripts (`node -e`, `python3 -c`). Nested subshell commands (`bash -c "..."`) are recursively validated.
+* **What is permitted:** Standard relative workspace file paths, HTTP/HTTPS URLs, safe pseudo-devices (`/dev/null`, `/dev/zero`, `/dev/urandom`, `/dev/random`, `/dev/stdin`, `/dev/stdout`, `/dev/stderr`, `/dev/fd/*`), sed/awk/cut/tr regex patterns and delimiter flags, and pure arithmetic expressions.
+* **Security boundary & limitations:** This containment mechanism is **pre-execution shell syntax validation, not OS-level containerization or kernel sandboxing**. Opaque binaries or compiled executable packages invoked in the workspace retain standard host-user permissions under the running Bun process.
+
 ## Storage
 
 By default persistent data is below `~/.mimin/data`:
@@ -283,6 +291,13 @@ auth.json
 ```
 
 `auth.json` holds API keys entered via `/provider` (chmod 600; environment variables take precedence).
+
+## Release Notes (v0.6.0)
+
+* **Shell-Aware Command Parser & Execution Containment:** Replaced token-masking heuristics with an AST-level command tokenizer and validator. Recursively inspects nested shell commands (`bash -c`, `sh -c`, `eval`, `exec`), denies opaque script execution, script sourcing, stdin shell piping, uncontained parameter expansion (`$HOME`, `${HOME}`), and dynamic interpreter escapes while permitting legitimate workspace workflows.
+* **Generalized Provider Mock-Server Contracts:** Added an offline mock-server contract test suite for Command Code (Anthropic `/messages` and OpenAI `/chat/completions`) and built-in Anthropic/OpenAI routes, verifying streaming responses, headers (`x-api-key`, `anthropic-version`, `Authorization`), tool-call parsing, HTTP error event propagation (401, 429, 500), and credential isolation.
+* **GitHub Actions CI Release Gates:** Enforced deterministic CI workflows with pinned Bun version `1.3.14`, version consistency checking (`check:version`), full test suites, path security/contract gates, bundle build, and standalone binary compile verification under least-privilege permissions.
+* **TUI Task Observability:** Enhanced `/tasks`, `/task <id>`, and the compact task board with runtime duration tracking (`durationMs`), review iteration counts (`rev N`), verification breakdown indicators (`passed`/`failed`), and full chronological transition history.
 
 ## Release Notes (v0.5.0)
 
