@@ -63,3 +63,15 @@ export {
   formatTaskCounts,
 } from "./task-board.js";
 export type { TaskListRow, TaskStatusCounts } from "./task-board.js";
+
+export {
+  DEFAULT_IGNORED_DIRS,
+  extractAtReference,
+  scanWorkspaceFiles,
+  scoreFileMatch,
+  buildFileCompletionValue,
+  suggestWorkspaceFiles,
+  applyAtReferenceCompletion,
+  clearWorkspaceFileCache,
+} from "./file-suggestions.js";
+export type { AtReferenceMatch } from "./file-suggestions.js";

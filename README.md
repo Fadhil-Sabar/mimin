@@ -227,6 +227,17 @@ Selects and restores an existing manager session.
 - `/session` opens a dropdown of previous manager sessions with their message count and age.
 - Selecting one restores that session: the transcript is cleared and replayed from the session's history, and subsequent prompts continue that session.
 
+#### Workspace file autocomplete (`@`)
+
+Typing `@` anywhere in the interactive prompt opens an autocomplete dropdown of files and directories in the currently opened workspace:
+
+- **Fuzzy matching & filtering**: Matches file basenames and relative paths with relevance ranking (exact > prefix > substring > subsequence).
+- **Workspace root containment**: Scans strictly within the workspace directory without escaping root or following uncontained links.
+- **Directory exclusion**: Automatically ignores build artifacts and heavy directories (`.git`, `node_modules`, `dist`, `.gemini`, `coverage`, `.next`, `.turbo`, `build`, etc.).
+- **Automatic path quoting**: Paths containing spaces or special characters are safely inserted in quotes (e.g. `@"docs/specs with spaces/req 1.md"`).
+- **Drill-down & trailing space**: Selecting a file appends a trailing space so you can continue typing; selecting a directory keeps the trailing slash to allow progressive drill-down.
+- **Keyboard navigation**: Use Up/Down arrows to select, Tab/Enter to apply, and Escape to dismiss the menu. Multiple `@` references are supported across a single prompt line.
+
 #### `/memory`
 
 Memory is written explicitly with `/memory` and, since v0.2.0, learned automatically from conversation. All writes always pass through credential-like secret filtering, and the UI reports whether redaction occurred. The manager can retrieve compact ranked memory snippets on demand with its `memory_search` tool, and bounded historical snippets with `session_search`; neither tool returns full records or transcripts.

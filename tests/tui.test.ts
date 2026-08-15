@@ -2064,4 +2064,57 @@ describe("lightweight pi-tui areas", () => {
     expect(detail).toContain("pending -> running");
     expect(detail).toContain("running -> completed");
   });
+
+  test("footer editor triggers @ workspace file autocomplete, filters, applies via Tab, and dismisses on Escape", async () => {
+    const { mkdir, writeFile, rm } = require("node:fs/promises");
+    const { join } = require("node:path");
+    const { tmpdir } = require("node:os");
+
+    const tmpWorkspace = join(
+      tmpdir(),
+      `mimin-tui-at-test-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+    await mkdir(join(tmpWorkspace, "src/components"), { recursive: true });
+    await writeFile(join(tmpWorkspace, "src/components/button.tsx"), "export const Button = () => null;");
+    await writeFile(join(tmpWorkspace, "README.md"), "# Hello");
+
+    try {
+      const footer = new Footer({
+        managerModel: "gpt-5.5",
+        workspace: tmpWorkspace,
+      });
+
+      // Type "@" into editor
+      for (const ch of "check @") {
+        footer.editor.handleInput(ch);
+      }
+      await new Promise((r) => setTimeout(r, 300));
+
+      expect(footer.editor.isShowingAutocomplete()).toBe(true);
+      const menu = textOf(footer.editor.render(80));
+      expect(menu).toContain("README.md");
+      expect(menu).toContain("button.tsx");
+
+      // Filter with "butt"
+      for (const ch of "butt") {
+        footer.editor.handleInput(ch);
+      }
+      await new Promise((r) => setTimeout(r, 300));
+      expect(footer.editor.isShowingAutocomplete()).toBe(true);
+      const filteredMenu = textOf(footer.editor.render(80));
+      expect(filteredMenu).toContain("button.tsx");
+
+      // Tab applies the selected file reference
+      footer.editor.handleInput("\t");
+      await new Promise((r) => setTimeout(r, 100));
+      expect(footer.editor.getText()).toBe("check @src/components/button.tsx ");
+
+      // Escape on idle editor does not error or submit
+      footer.editor.handleInput("\u001b");
+      await new Promise((r) => setTimeout(r, 50));
+      expect(footer.editor.getText()).toBe("check @src/components/button.tsx ");
+    } finally {
+      await rm(tmpWorkspace, { recursive: true, force: true });
+    }
+  });
 });

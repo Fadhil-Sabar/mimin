@@ -19,6 +19,11 @@ import { suggestModels } from "./model-suggestions.js";
 import type { ModelSuggestionSource } from "./model-suggestions.js";
 import { cyan, dim, green, yellow } from "./theme.js";
 import { spinnerFrame, type AnimationState } from "./animation.js";
+import {
+  extractAtReference,
+  suggestWorkspaceFiles,
+  applyAtReferenceCompletion,
+} from "./file-suggestions.js";
 
 export interface ContextUsage {
   used: number;
@@ -152,11 +157,30 @@ function slashAwareProvider(
         if (items.length === 0) return null;
         return { items, prefix: argumentText };
       }
+
+      // Check for '@' workspace file reference autocomplete anywhere in line
+      const atMatch = extractAtReference(before);
+      if (atMatch) {
+        const items = await suggestWorkspaceFiles(workspace, atMatch.query, {
+          isQuoted: atMatch.isQuoted,
+          quoteChar: atMatch.quoteChar,
+          signal: options.signal,
+        });
+        if (items.length === 0) return null;
+        return { items, prefix: atMatch.rawPrefix };
+      }
+
       return base.getSuggestions(lines, cursorLine, cursorCol, options);
     },
     applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => {
       const currentLine = lines[cursorLine] ?? "";
       const before = currentLine.slice(0, cursorCol);
+
+      // Complete '@' workspace file reference
+      if (prefix.startsWith("@")) {
+        return applyAtReferenceCompletion(lines, cursorLine, cursorCol, item, prefix);
+      }
+
       // When completing a model ID after "/model <role>", keep the role
       // ("/model sidekick gpt-5.5"), otherwise the generic completion would
       // replace the role with the model id.
@@ -190,10 +214,16 @@ function slashAwareProvider(
       // completion replaces the id correctly.
       return base.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
     },
-    shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) =>
-      base.shouldTriggerFileCompletion
+    shouldTriggerFileCompletion: (lines, cursorLine, cursorCol) => {
+      const currentLine = lines[cursorLine] ?? "";
+      const before = currentLine.slice(0, cursorCol);
+      if (extractAtReference(before)) {
+        return true;
+      }
+      return base.shouldTriggerFileCompletion
         ? base.shouldTriggerFileCompletion(lines, cursorLine, cursorCol)
-        : true,
+        : true;
+    },
   };
 }
 
